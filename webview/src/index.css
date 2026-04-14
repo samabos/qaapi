@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Map to VS Code theme tokens — falls back to dark defaults outside the editor */
+:root {
+  --bg: var(--vscode-editor-background, #0d1117);
+  --surface: var(--vscode-sideBar-background, #161b22);
+  --surface2: var(--vscode-list-hoverBackground, #1c2333);
+  --border: var(--vscode-panel-border, #30363d);
+  --text: var(--vscode-editor-foreground, #e6edf3);
+  --text-muted: var(--vscode-descriptionForeground, #7d8590);
+  --accent: var(--vscode-focusBorder, #2f81f7);
+  --green: var(--vscode-testing-iconPassed, #3fb950);
+  --red: var(--vscode-testing-iconFailed, #f85149);
+  --yellow: var(--vscode-editorWarning-foreground, #d29922);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--vscode-font-family, 'Inter', system-ui, sans-serif);
+  font-size: var(--vscode-font-size, 13px);
+  line-height: 1.5;
+  overflow: hidden;
+  height: 100vh;
+}
+
+#root {
+  height: 100%;
+}
+
+code, .font-mono {
+  font-family: var(--vscode-editor-font-family, 'IBM Plex Mono', monospace);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Progress shimmer while waiting for Claude */
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}

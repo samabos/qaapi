@@ -1,0 +1,48 @@
+{
+  "name": "qaapi",
+  "displayName": "QAAPI",
+  "description": "AI-powered API integration testing. Combines OpenAPI specs with source code intelligence to generate tests that find real bugs.",
+  "version": "0.0.1",
+  "publisher": "qaapi",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "Testing"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "qaapi.openPanel",
+        "title": "QAAPI: Open Panel"
+      },
+      {
+        "command": "qaapi.generateTests",
+        "title": "QAAPI: Generate Tests"
+      },
+      {
+        "command": "qaapi.runTests",
+        "title": "QAAPI: Run Tests"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build:webview": "cd webview && npm run build",
+    "build": "npm run compile && npm run build:webview"
+  },
+  "dependencies": {
+    "@apidevtools/swagger-parser": "^10.1.1",
+    "jsonpath-plus": "^10.3.0",
+    "undici": "^7.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.93.0",
+    "typescript": "^5.7.0"
+  }
+}
