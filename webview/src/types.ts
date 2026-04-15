@@ -7,12 +7,13 @@ export interface Environment {
 }
 
 export interface AuthConfig {
-  strategy: 'credentials' | 'auto-register' | 'api-key' | 'oauth2-client-credentials' | 'none';
+  strategy: 'credentials' | 'auto-register' | 'api-key' | 'oauth2-client-credentials' | 'token-chain' | 'none';
   credentials?: Record<string, RoleCredentials>;
   loginEndpoint?: string;
   registerEndpoint?: string;
   apiKey?: string;
   oauth2?: OAuth2ClientCredentials;
+  tokenChain?: TokenChain;
 }
 
 export interface OAuth2ClientCredentials {
@@ -20,6 +21,22 @@ export interface OAuth2ClientCredentials {
   clientId: string;
   clientSecret: string;
   scope?: string;
+}
+
+export interface TokenChain {
+  steps: TokenStep[];
+  insecureTls?: boolean;
+}
+
+export interface TokenStep {
+  name: string;
+  method: 'GET' | 'POST';
+  url: string;
+  bodyType: 'json' | 'form' | 'raw' | 'none';
+  body?: Record<string, string>;
+  bodyRaw?: string;
+  headers?: Record<string, string>;
+  extract: string;
 }
 
 export interface RoleCredentials {
@@ -130,6 +147,8 @@ export type ExtensionToWebviewMessage =
   | { type: 'AUTH_CONFIG_LOADED'; config: AuthConfig }
   | { type: 'AUTH_STATUS'; strategy: string; user?: string; ready: boolean }
   | { type: 'API_STATUS'; reachable: boolean; latency?: number }
+  | { type: 'PAYLOAD_SUGGESTION'; stepId: string; payload?: Record<string, unknown>; error?: string }
+  | { type: 'CASES_EXPANDED'; suiteId: string; journeyId: string; added: number; error?: string }
   | { type: 'ERROR'; message: string };
 
 export type WebviewToExtensionMessage =
@@ -138,11 +157,16 @@ export type WebviewToExtensionMessage =
   | { type: 'RUN_TESTS'; suiteId?: string; journeyId?: string; stepId?: string }
   | { type: 'UPDATE_TEST_CASE'; suiteId: string; journey: Journey }
   | { type: 'DELETE_TEST_CASE'; suiteId: string; journeyId: string }
+  | { type: 'DELETE_SUITE'; suiteId: string }
   | { type: 'SET_ENVIRONMENT'; name: string }
   | { type: 'SET_AUTH'; config: AuthConfig }
   | { type: 'UPDATE_CONFIG'; config: QAAPIConfig }
   | { type: 'CANCEL_GENERATION' }
-  | { type: 'OPEN_SETTINGS' };
+  | { type: 'OPEN_SETTINGS' }
+  | { type: 'EXPORT_BUNDLE' }
+  | { type: 'IMPORT_BUNDLE' }
+  | { type: 'SUGGEST_PAYLOAD'; suiteId: string; journeyId: string; stepId: string; description: string }
+  | { type: 'EXPAND_CASES'; suiteId: string; journeyId: string };
 
 /* ------------------------------------------------------------------ */
 /*  VSCode API type for webview                                        */

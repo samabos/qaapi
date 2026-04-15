@@ -40,6 +40,8 @@ export default function App({ vscode }: AppProps) {
   const [genStartTime, setGenStartTime] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [suggestingStepId, setSuggestingStepId] = useState<string | null>(null);
+  const [expandingEndpointKey, setExpandingEndpointKey] = useState<string | null>(null);
 
   const handleMessage = useCallback((event: MessageEvent<ExtensionToWebviewMessage>) => {
     const msg = event.data;
@@ -97,6 +99,45 @@ export default function App({ vscode }: AppProps) {
         setApiReachable(msg.reachable);
         setApiLatency(msg.latency);
         break;
+      case 'CASES_EXPANDED':
+        setExpandingEndpointKey(null);
+        if (msg.error) {
+          setError(`Expand cases failed: ${msg.error}`);
+          setTimeout(() => setError(null), 6000);
+        } else if (msg.added === 0) {
+          setError('No new cases to add — Claude found nothing uncovered.');
+          setTimeout(() => setError(null), 4000);
+        }
+        // Suites are reloaded via TEST_SUITES_LOADED on the extension side
+        break;
+      case 'PAYLOAD_SUGGESTION':
+        setSuggestingStepId(null);
+        if (msg.error) {
+          setError(`Suggest failed: ${msg.error}`);
+          setTimeout(() => setError(null), 6000);
+        } else if (msg.payload) {
+          // Apply suggestion by finding the step and updating via the normal path
+          setSuites(prev => prev.map(s => ({
+            ...s,
+            journeys: s.journeys.map(j => ({
+              ...j,
+              steps: j.steps.map(step => step.id === msg.stepId ? { ...step, payload: msg.payload } : step),
+            })),
+          })));
+          // Persist: find the journey that contains the step and send UPDATE_TEST_CASE
+          for (const s of suites) {
+            const j = s.journeys.find(jn => jn.steps.some(st => st.id === msg.stepId));
+            if (j) {
+              const updated = {
+                ...j,
+                steps: j.steps.map(st => st.id === msg.stepId ? { ...st, payload: msg.payload } : st),
+              };
+              vscode.postMessage({ type: 'UPDATE_TEST_CASE', suiteId: s.id, journey: updated });
+              break;
+            }
+          }
+        }
+        break;
       case 'ERROR':
         setError(msg.message);
         setTimeout(() => setError(null), 5000);
@@ -149,14 +190,75 @@ export default function App({ vscode }: AppProps) {
 
   const handleRunJourney = (suiteId: string, journeyId: string) => {
     setStepResults([]);
-    setRunResults([]);
+    // Only clear the previous result for THIS journey — keep other journeys'
+    // pass/fail state intact so sidebar aggregates don't reset.
+    setRunResults(prev => prev.filter(r => !(r.suiteId === suiteId && r.journeyId === journeyId)));
     vscode.postMessage({ type: 'RUN_TESTS', suiteId, journeyId });
   };
 
   const handleRunStep = (suiteId: string, journeyId: string, stepId: string) => {
     setStepResults(prev => prev.filter(r => r.stepId !== stepId));
-    setRunResults([]);
+    // The runner re-executes the whole journey (stepId only filters which step
+    // updates get shown), so a new RUN_COMPLETE is emitted. Drop the prior
+    // result for this journey so we don't end up with duplicates.
+    setRunResults(prev => prev.filter(r => !(r.suiteId === suiteId && r.journeyId === journeyId)));
     vscode.postMessage({ type: 'RUN_TESTS', suiteId, journeyId, stepId });
+  };
+
+  const handleUpdateJourney = (suiteId: string, journey: import('./types').Journey) => {
+    // Optimistic local update so the editor stays in sync without a round-trip
+    setSuites(prev => prev.map(s =>
+      s.id === suiteId
+        ? { ...s, journeys: s.journeys.map(j => j.id === journey.id ? journey : j) }
+        : s,
+    ));
+    vscode.postMessage({ type: 'UPDATE_TEST_CASE', suiteId, journey });
+  };
+
+  const handleRenameJourney = (suiteId: string, journeyId: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    const suite = suites.find(s => s.id === suiteId);
+    const journey = suite?.journeys.find(j => j.id === journeyId);
+    if (!journey) return;
+    handleUpdateJourney(suiteId, { ...journey, name: trimmed });
+  };
+
+  const handleDuplicateJourney = (suiteId: string, journeyId: string) => {
+    const suite = suites.find(s => s.id === suiteId);
+    const journey = suite?.journeys.find(j => j.id === journeyId);
+    if (!journey) return;
+    const copy: import('./types').Journey = {
+      ...journey,
+      id: `${journey.id}-copy-${Date.now()}`,
+      name: `${journey.name} (copy)`,
+      // Deep-ish copy so edits on either side don't collide
+      steps: journey.steps.map(s => ({ ...s })),
+      extractions: journey.extractions.map(e => ({ ...e })),
+    };
+    setSuites(prev => prev.map(s =>
+      s.id === suiteId ? { ...s, journeys: [...s.journeys, copy] } : s,
+    ));
+    vscode.postMessage({ type: 'UPDATE_TEST_CASE', suiteId, journey: copy });
+  };
+
+  const handleDeleteJourney = (suiteId: string, journeyId: string) => {
+    setSuites(prev => prev.map(s =>
+      s.id === suiteId ? { ...s, journeys: s.journeys.filter(j => j.id !== journeyId) } : s,
+    ));
+    if (selectedSuiteId === suiteId && selectedJourneyId === journeyId) {
+      setSelectedJourneyId(null);
+    }
+    vscode.postMessage({ type: 'DELETE_TEST_CASE', suiteId, journeyId });
+  };
+
+  const handleDeleteSuite = (suiteId: string) => {
+    setSuites(prev => prev.filter(s => s.id !== suiteId));
+    if (selectedSuiteId === suiteId) {
+      setSelectedSuiteId(null);
+      setSelectedJourneyId(null);
+    }
+    vscode.postMessage({ type: 'DELETE_SUITE', suiteId });
   };
 
   const handleSelectJourney = (suiteId: string, journeyId: string) => {
@@ -185,7 +287,6 @@ export default function App({ vscode }: AppProps) {
         authReady={authReady}
         authStrategy={authStrategy}
         generating={generating}
-        genProgress={genProgress}
         onSetEnvironment={(name) => vscode.postMessage({ type: 'SET_ENVIRONMENT', name })}
         onGenerate={handleGenerate}
         onRunAll={handleRunAll}
@@ -234,6 +335,23 @@ export default function App({ vscode }: AppProps) {
           runResults={runResults}
           onSelect={handleSelectJourney}
           onRunJourney={handleRunJourney}
+          onRenameJourney={handleRenameJourney}
+          onDuplicateJourney={handleDuplicateJourney}
+          onDeleteJourney={handleDeleteJourney}
+          onDeleteSuite={handleDeleteSuite}
+          onExpandCases={(suiteId, journeyId) => {
+            // Encode the endpoint by its method+path so the sidebar can show
+            // a pending state on the right group. Must match Sidebar's endpointKey()
+            // which normalizes {{ctx.*}} templates to {id}.
+            const journey = suites.find(s => s.id === suiteId)?.journeys.find(j => j.id === journeyId);
+            const step = journey?.steps[0];
+            if (step) {
+              const normalized = step.path.replaceAll(/\{\{[^}]+\}\}/g, '{id}');
+              setExpandingEndpointKey(`${suiteId}:${step.method} ${normalized}`);
+            }
+            vscode.postMessage({ type: 'EXPAND_CASES', suiteId, journeyId });
+          }}
+          expandingEndpointKey={expandingEndpointKey}
         />
         <MainPanel
           journey={selectedJourney}
@@ -244,6 +362,12 @@ export default function App({ vscode }: AppProps) {
           )}
           onRunJourney={handleRunJourney}
           onRunStep={handleRunStep}
+          onUpdateJourney={handleUpdateJourney}
+          onSuggestPayload={(suiteId, journeyId, stepId, description) => {
+            setSuggestingStepId(stepId);
+            vscode.postMessage({ type: 'SUGGEST_PAYLOAD', suiteId, journeyId, stepId, description });
+          }}
+          suggestingStepId={suggestingStepId}
         />
       </div>
 
@@ -253,6 +377,8 @@ export default function App({ vscode }: AppProps) {
           authConfig={authConfig}
           onSave={handleSaveConfig}
           onSaveAuth={handleSaveAuth}
+          onExportBundle={() => vscode.postMessage({ type: 'EXPORT_BUNDLE' })}
+          onImportBundle={() => vscode.postMessage({ type: 'IMPORT_BUNDLE' })}
           onClose={() => setShowSettings(false)}
         />
       )}

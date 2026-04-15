@@ -8,6 +8,12 @@ interface SidebarProps {
   runResults: RunResult[];
   onSelect: (suiteId: string, journeyId: string) => void;
   onRunJourney: (suiteId: string, journeyId: string) => void;
+  onRenameJourney: (suiteId: string, journeyId: string, newName: string) => void;
+  onDuplicateJourney: (suiteId: string, journeyId: string) => void;
+  onDeleteJourney: (suiteId: string, journeyId: string) => void;
+  onDeleteSuite: (suiteId: string) => void;
+  onExpandCases: (suiteId: string, journeyId: string) => void;
+  expandingEndpointKey: string | null;
 }
 
 const METHOD_COLORS: Record<HttpMethod, string> = {
@@ -60,11 +66,20 @@ export default function Sidebar({
   runResults,
   onSelect,
   onRunJourney,
+  onRenameJourney,
+  onDuplicateJourney,
+  onDeleteJourney,
+  onDeleteSuite,
+  onExpandCases,
+  expandingEndpointKey,
 }: SidebarProps) {
   const [expandedSuites, setExpandedSuites] = useState<Set<string>>(
     new Set(suites.map(s => s.id)),
   );
   const [expandedEndpoints, setExpandedEndpoints] = useState<Set<string>>(new Set());
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const toggleSuite = (id: string) => {
     setExpandedSuites(prev => {
@@ -83,6 +98,25 @@ export default function Sidebar({
       return next;
     });
   };
+
+  const aggregateCounts = (suiteId: string, journeys: Journey[]) => {
+    let passed = 0;
+    let failed = 0;
+    for (const j of journeys) {
+      const s = getJourneyStatus(suiteId, j.id);
+      if (s === 'passed') passed++;
+      else if (s === 'failed' || s === 'mixed') failed++;
+    }
+    return { passed, failed, notRun: journeys.length - passed - failed };
+  };
+
+  const renderCounts = (c: { passed: number; failed: number; notRun: number }) => (
+    <span className="flex items-center gap-1.5 text-[10px] font-mono flex-shrink-0">
+      {c.passed > 0 && <span className="text-green">{c.passed}{'\u2713'}</span>}
+      {c.failed > 0 && <span className="text-red">{c.failed}{'\u2717'}</span>}
+      {c.notRun > 0 && <span className="text-text-muted">{c.notRun}</span>}
+    </span>
+  );
 
   const getJourneyStatus = (suiteId: string, journeyId: string): 'none' | 'passed' | 'failed' | 'mixed' => {
     const results = runResults.filter(r => r.suiteId === suiteId && r.journeyId === journeyId);
@@ -112,35 +146,102 @@ export default function Sidebar({
     );
   };
 
+  const commitRename = (suiteId: string, journeyId: string) => {
+    if (renameValue.trim()) onRenameJourney(suiteId, journeyId, renameValue);
+    setRenamingId(null);
+    setRenameValue('');
+  };
+
+  const startRename = (journey: Journey) => {
+    setRenamingId(journey.id);
+    setRenameValue(journey.name);
+    setConfirmDeleteId(null);
+  };
+
   const renderJourneyButton = (suiteId: string, journey: Journey) => {
     const status = getJourneyStatus(suiteId, journey.id);
     const isSelected = suiteId === selectedSuiteId && journey.id === selectedJourneyId;
     const firstTag = journey.tags?.[0];
+    const isRenaming = renamingId === journey.id;
+    const isConfirmingDelete = confirmDeleteId === journey.id;
 
     return (
-      <button
+      <div
         key={journey.id}
-        onClick={() => onSelect(suiteId, journey.id)}
-        className={`group w-full flex items-center gap-1.5 px-2 py-1 text-xs transition-colors ${
-          isSelected
-            ? 'bg-accent/10 text-accent'
-            : 'text-text-muted hover:text-text hover:bg-surface2'
+        className={`group flex items-center gap-1.5 px-2 py-1 text-xs transition-colors ${
+          isSelected ? 'bg-accent/10 text-accent' : 'text-text-muted hover:text-text hover:bg-surface2'
         }`}
       >
         {statusDot(status)}
-        <span className="truncate flex-1 text-left">{journey.name}</span>
-        {firstTag && tagBadge(firstTag)}
-        <span
-          onClick={(e) => {
-            e.stopPropagation();
-            onRunJourney(suiteId, journey.id);
-          }}
-          className="opacity-0 group-hover:opacity-100 text-accent hover:text-text transition-opacity cursor-pointer flex-shrink-0"
-          title="Run journey"
-        >
-          {'\u25B6'}
-        </span>
-      </button>
+
+        {isRenaming ? (
+          <input
+            autoFocus
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onBlur={() => commitRename(suiteId, journey.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitRename(suiteId, journey.id);
+              if (e.key === 'Escape') { setRenamingId(null); setRenameValue(''); }
+            }}
+            className="flex-1 bg-surface2 text-text text-xs px-1 py-0 rounded border border-accent focus:border-accent outline-none font-mono"
+          />
+        ) : (
+          <button
+            onClick={() => onSelect(suiteId, journey.id)}
+            className="truncate flex-1 text-left bg-transparent border-none p-0 cursor-pointer inherit-color"
+          >
+            {journey.name}
+          </button>
+        )}
+
+        {!isRenaming && firstTag && tagBadge(firstTag)}
+
+        {!isRenaming && !isConfirmingDelete && (
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+            <button
+              onClick={(e) => { e.stopPropagation(); onRunJourney(suiteId, journey.id); }}
+              className="text-accent hover:text-text"
+              title="Run journey"
+            >{'\u25B6'}</button>
+            <button
+              onClick={(e) => { e.stopPropagation(); startRename(journey); }}
+              className="text-text-muted hover:text-text"
+              title="Rename"
+            >{'\u270E'}</button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onDuplicateJourney(suiteId, journey.id); }}
+              className="text-text-muted hover:text-text"
+              title="Duplicate"
+            >{'\u29C9'}</button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(journey.id); }}
+              className="text-text-muted hover:text-red"
+              title="Delete"
+            >{'\u00D7'}</button>
+          </div>
+        )}
+
+        {isConfirmingDelete && (
+          <div className="flex items-center gap-1 flex-shrink-0">
+            <span className="text-[10px] text-red">Delete?</span>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeleteJourney(suiteId, journey.id);
+                setConfirmDeleteId(null);
+              }}
+              className="text-red hover:text-text text-[10px]"
+              title="Confirm delete"
+            >{'\u2713'}</button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); }}
+              className="text-text-muted hover:text-text text-[10px]"
+              title="Cancel"
+            >{'\u00D7'}</button>
+          </div>
+        )}
+      </div>
     );
   };
 
@@ -154,20 +255,50 @@ export default function Sidebar({
           No test suites yet. Click Generate to create tests from your API spec.
         </div>
       )}
-      {suites.map(suite => (
+      {suites.map(suite => {
+        const isConfirmingSuiteDelete = confirmDeleteId === suite.id;
+        return (
         <div key={suite.id}>
-          <button
-            onClick={() => toggleSuite(suite.id)}
-            className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-text hover:bg-surface2 transition-colors"
+          <div
+            className="group w-full flex items-center gap-2 px-3 py-1.5 text-sm text-text hover:bg-surface2 transition-colors"
           >
-            <span className="text-text-muted text-xs">
-              {expandedSuites.has(suite.id) ? '\u25BC' : '\u25B6'}
-            </span>
-            <span className="font-medium">{suite.name}</span>
-            <span className="ml-auto text-xs text-text-muted">
-              {suite.journeys.length}
-            </span>
-          </button>
+            <button
+              onClick={() => toggleSuite(suite.id)}
+              className="flex items-center gap-2 flex-1 min-w-0 text-left bg-transparent border-none p-0 cursor-pointer inherit-color"
+            >
+              <span className="text-text-muted text-xs">
+                {expandedSuites.has(suite.id) ? '\u25BC' : '\u25B6'}
+              </span>
+              <span className="font-medium truncate">{suite.name}</span>
+            </button>
+            {renderCounts(aggregateCounts(suite.id, suite.journeys))}
+            {!isConfirmingSuiteDelete && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(suite.id); }}
+                className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-red transition-opacity text-xs"
+                title="Delete suite"
+              >{'\u00D7'}</button>
+            )}
+            {isConfirmingSuiteDelete && (
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <span className="text-[10px] text-red">Delete suite?</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDeleteSuite(suite.id);
+                    setConfirmDeleteId(null);
+                  }}
+                  className="text-red hover:text-text text-[10px]"
+                  title="Confirm"
+                >{'\u2713'}</button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); }}
+                  className="text-text-muted hover:text-text text-[10px]"
+                  title="Cancel"
+                >{'\u00D7'}</button>
+              </div>
+            )}
+          </div>
 
           {expandedSuites.has(suite.id) && (
             <div className="ml-2">
@@ -180,25 +311,39 @@ export default function Sidebar({
                 const path = ep.substring(spaceIdx + 1);
                 const methodColor = METHOD_COLORS[method] ?? 'text-text-muted';
 
+                const isExpandingThis = expandingEndpointKey === epKey;
                 return (
                   <div key={ep}>
-                    <button
-                      onClick={() => toggleEndpoint(epKey)}
-                      className="w-full flex items-center gap-1.5 px-2 py-1 text-xs text-text-muted hover:text-text hover:bg-surface2 transition-colors"
-                    >
-                      <span className="text-[10px]">
-                        {isExpanded ? '\u25BC' : '\u25B6'}
-                      </span>
-                      <span className={`font-mono font-bold text-[10px] ${methodColor}`}>
-                        {method}
-                      </span>
-                      <span className="font-mono text-[10px] truncate flex-1 text-left">
-                        {path}
-                      </span>
-                      <span className="text-[10px] text-text-muted flex-shrink-0">
-                        {journeys.length}
-                      </span>
-                    </button>
+                    <div className="group w-full flex items-center gap-1.5 px-2 py-1 text-xs text-text-muted hover:text-text hover:bg-surface2 transition-colors">
+                      <button
+                        onClick={() => toggleEndpoint(epKey)}
+                        className="flex items-center gap-1.5 flex-1 min-w-0 text-left bg-transparent border-none p-0 cursor-pointer inherit-color"
+                      >
+                        <span className="text-[10px]">
+                          {isExpanded ? '\u25BC' : '\u25B6'}
+                        </span>
+                        <span className={`font-mono font-bold text-[10px] ${methodColor}`}>
+                          {method}
+                        </span>
+                        <span className="font-mono text-[10px] truncate flex-1 text-left">
+                          {path}
+                        </span>
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // Use any journey in this group as the seed — the backend
+                          // uses method+path + existing cases for dedup.
+                          onExpandCases(suite.id, journeys[0].id);
+                        }}
+                        disabled={isExpandingThis}
+                        className="opacity-0 group-hover:opacity-100 text-accent hover:text-text disabled:text-text-muted disabled:cursor-wait transition-opacity flex-shrink-0"
+                        title="Ask Claude to generate extra test cases for this endpoint"
+                      >
+                        {isExpandingThis ? '…' : '\u2728'}
+                      </button>
+                      {renderCounts(aggregateCounts(suite.id, journeys))}
+                    </div>
                     {isExpanded && (
                       <div className="ml-3">
                         {journeys.map(journey => renderJourneyButton(suite.id, journey))}
@@ -210,7 +355,8 @@ export default function Sidebar({
             </div>
           )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

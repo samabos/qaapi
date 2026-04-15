@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { Journey, Step, StepResult, RunResult, HttpMethod } from '../types';
 
 interface MainPanelProps {
@@ -8,6 +8,197 @@ interface MainPanelProps {
   runResults: RunResult[];
   onRunJourney: (suiteId: string, journeyId: string) => void;
   onRunStep: (suiteId: string, journeyId: string, stepId: string) => void;
+  onUpdateJourney: (suiteId: string, journey: Journey) => void;
+  onSuggestPayload: (suiteId: string, journeyId: string, stepId: string, description: string) => void;
+  suggestingStepId: string | null;
+}
+
+const METHODS_WITH_BODY: HttpMethod[] = ['POST', 'PUT', 'PATCH'];
+
+/* ---- Shared tab control --------------------------------------------- */
+
+function Tabs<T extends string>({ tabs, active, onChange }: {
+  tabs: readonly T[];
+  active: T;
+  onChange: (t: T) => void;
+}) {
+  return (
+    <div className="flex border-b border-border">
+      {tabs.map(t => (
+        <button
+          key={t}
+          onClick={() => onChange(t)}
+          className={`px-3 py-1 text-[11px] font-medium transition-colors ${
+            active === t
+              ? 'text-text border-b-2 border-accent -mb-px'
+              : 'text-text-muted hover:text-text'
+          }`}
+        >
+          {t}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* ---- Editable JSON body --------------------------------------------- */
+
+function BodyEditor({ value, onSave, readOnly }: {
+  value: Record<string, unknown> | undefined;
+  onSave: (next: Record<string, unknown> | undefined) => void;
+  readOnly?: boolean;
+}) {
+  const format = (v: Record<string, unknown> | undefined) =>
+    v && Object.keys(v).length > 0 ? JSON.stringify(v, null, 2) : '';
+
+  const [text, setText] = useState(format(value));
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-sync when the journey is swapped from under us
+  useEffect(() => {
+    setText(format(value));
+    setError(null);
+  }, [value]);
+
+  const commit = () => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      setError(null);
+      onSave(undefined);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      setError(null);
+      onSave(parsed);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invalid JSON');
+    }
+  };
+
+  if (readOnly) {
+    return (
+      <pre className="p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-64 text-text">
+        {text || <span className="text-text-muted italic">No body</span>}
+      </pre>
+    );
+  }
+
+  return (
+    <div>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        placeholder={'{\n  "field": "value"\n}'}
+        rows={Math.max(6, Math.min(18, text.split('\n').length + 1))}
+        className={`w-full p-2 bg-surface2 rounded text-xs font-mono text-text border outline-none transition-colors ${
+          error ? 'border-red' : 'border-border focus:border-accent'
+        }`}
+      />
+      {error && (
+        <div className="mt-1 text-[11px] text-red">Invalid JSON: {error}</div>
+      )}
+      {!error && (
+        <div className="mt-1 text-[10px] text-text-muted">
+          Auto-saves when the field loses focus.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- Key / value editor (headers, query params) -------------------- */
+
+function KeyValueEditor({ value, onSave, readOnly }: {
+  value: Record<string, string> | undefined;
+  onSave: (next: Record<string, string> | undefined) => void;
+  readOnly?: boolean;
+}) {
+  const entries = Object.entries(value ?? {});
+
+  if (readOnly) {
+    if (entries.length === 0) {
+      return <div className="text-xs text-text-muted italic p-2">No entries</div>;
+    }
+    return (
+      <pre className="p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-48 text-text">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    );
+  }
+
+  const display = entries.length === 0 ? [['', '']] : entries;
+
+  const update = (idx: number, key: string, val: string) => {
+    const next: Record<string, string> = {};
+    display.forEach(([k, v], i) => {
+      const fk = i === idx ? key : k;
+      const fv = i === idx ? val : v;
+      if (fk) next[fk] = fv;
+    });
+    onSave(Object.keys(next).length > 0 ? next : undefined);
+  };
+
+  const remove = (idx: number) => {
+    const next: Record<string, string> = {};
+    display.forEach(([k, v], i) => {
+      if (i !== idx && k) next[k] = v;
+    });
+    onSave(Object.keys(next).length > 0 ? next : undefined);
+  };
+
+  const add = () => {
+    onSave({ ...(value ?? {}), '': '' });
+  };
+
+  return (
+    <div className="space-y-1">
+      {display.map(([k, v], idx) => (
+        <div key={idx} className="flex gap-1">
+          <input
+            type="text"
+            value={k}
+            onChange={(e) => update(idx, e.target.value, v)}
+            placeholder="key"
+            className="flex-1 bg-surface2 text-text text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none font-mono"
+          />
+          <input
+            type="text"
+            value={v}
+            onChange={(e) => update(idx, k, e.target.value)}
+            placeholder="value"
+            className="flex-[2] bg-surface2 text-text text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none font-mono"
+          />
+          <button
+            onClick={() => remove(idx)}
+            className="px-1.5 text-xs text-text-muted hover:text-red transition-colors"
+          >
+            &times;
+          </button>
+        </div>
+      ))}
+      <button
+        onClick={add}
+        className="text-[11px] text-accent hover:text-accent/80 transition-colors"
+      >
+        + Add
+      </button>
+    </div>
+  );
+}
+
+/* ---- Read-only JSON preview ---------------------------------------- */
+
+function JsonPreview({ data }: { data: unknown }) {
+  if (data === null || data === undefined) {
+    return <div className="text-xs text-text-muted italic p-2">No data</div>;
+  }
+  return (
+    <pre className="p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-64 text-text">
+      {typeof data === 'string' ? data : JSON.stringify(data, null, 2)}
+    </pre>
+  );
 }
 
 const METHOD_COLORS: Record<HttpMethod, string> = {
@@ -38,8 +229,20 @@ function CollapsibleSection({ title, defaultOpen = false, children }: {
   );
 }
 
-export default function MainPanel({ journey, suiteId, stepResults, runResults, onRunJourney, onRunStep }: MainPanelProps) {
+export default function MainPanel({ journey, suiteId, stepResults, runResults, onRunJourney, onRunStep, onUpdateJourney, onSuggestPayload, suggestingStepId }: MainPanelProps) {
   const [expandedStep, setExpandedStep] = useState<string | null>(null);
+  const [reqTab, setReqTab] = useState<'Body' | 'Headers' | 'Query' | 'Sent'>('Body');
+  const [resTab, setResTab] = useState<'Body' | 'Headers'>('Body');
+  const [caseDescriptions, setCaseDescriptions] = useState<Record<string, string>>({});
+
+  const updateStep = (stepId: string, patch: Partial<Step>) => {
+    if (!journey || !suiteId) return;
+    const next: Journey = {
+      ...journey,
+      steps: journey.steps.map(s => s.id === stepId ? { ...s, ...patch } : s),
+    };
+    onUpdateJourney(suiteId, next);
+  };
 
   if (!journey) {
     return (
@@ -68,82 +271,99 @@ export default function MainPanel({ journey, suiteId, stepResults, runResults, o
   };
 
   const renderRequestSection = (step: Step, result: StepResult | undefined) => {
-    const hasRequestData = result?.requestUrl || result?.requestHeaders || result?.requestBody;
-    const hasDefinition = step.payload || step.headers || step.queryParams;
-    if (!hasRequestData && !hasDefinition) return null;
+    const supportsBody = METHODS_WITH_BODY.includes(step.method);
+    const hasSent = !!(result?.requestHeaders || result?.requestBody !== undefined);
+    const baseTabs: ('Body' | 'Headers' | 'Query')[] = supportsBody
+      ? ['Body', 'Headers', 'Query']
+      : ['Headers', 'Query'];
+    const tabs: ('Body' | 'Headers' | 'Query' | 'Sent')[] = hasSent
+      ? [...baseTabs, 'Sent']
+      : baseTabs;
+    const active = tabs.includes(reqTab) ? reqTab : tabs[0];
 
     return (
-      <CollapsibleSection title="Request">
+      <CollapsibleSection title="Request" defaultOpen>
         {result?.requestUrl && (
-          <div className="mb-1">
+          <div className="mb-2">
             <span className="text-[10px] text-text-muted">URL: </span>
             <span className="font-mono text-xs text-text break-all">{result.requestUrl}</span>
           </div>
         )}
-        {result?.requestHeaders && Object.keys(result.requestHeaders).length > 0 && (
-          <div className="mb-1">
-            <span className="text-[10px] text-text-muted">Headers:</span>
-            <pre className="mt-0.5 p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-32 text-text">
-              {JSON.stringify(result.requestHeaders, null, 2)}
-            </pre>
-          </div>
-        )}
-        {result?.requestBody !== undefined && (
-          <div className="mb-1">
-            <span className="text-[10px] text-text-muted">Body:</span>
-            <pre className="mt-0.5 p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-48 text-text">
-              {JSON.stringify(result.requestBody, null, 2)}
-            </pre>
-          </div>
-        )}
-        {!result?.requestBody && step.payload && (
-          <div className="mb-1">
-            <span className="text-[10px] text-text-muted">Payload (definition):</span>
-            <pre className="mt-0.5 p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-48 text-text">
-              {JSON.stringify(step.payload, null, 2)}
-            </pre>
-          </div>
-        )}
-        {!result?.requestHeaders && step.headers && Object.keys(step.headers).length > 0 && (
-          <div className="mb-1">
-            <span className="text-[10px] text-text-muted">Headers (definition):</span>
-            <pre className="mt-0.5 p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-32 text-text">
-              {JSON.stringify(step.headers, null, 2)}
-            </pre>
-          </div>
-        )}
-        {step.queryParams && Object.keys(step.queryParams).length > 0 && (
-          <div className="mb-1">
-            <span className="text-[10px] text-text-muted">Query Params:</span>
-            <pre className="mt-0.5 p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-32 text-text">
-              {JSON.stringify(step.queryParams, null, 2)}
-            </pre>
-          </div>
-        )}
+
+        <Tabs tabs={tabs} active={active} onChange={setReqTab} />
+
+        <div className="pt-2">
+          {active === 'Body' && supportsBody && (
+            <div className="space-y-2">
+              <div className="flex items-start gap-2">
+                <input
+                  type="text"
+                  value={caseDescriptions[step.id] ?? ''}
+                  onChange={(e) => setCaseDescriptions(prev => ({ ...prev, [step.id]: e.target.value }))}
+                  placeholder='What are you testing? e.g. "missing required field", "valid happy path"'
+                  className="flex-1 bg-surface2 text-text text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none"
+                />
+                <button
+                  onClick={() => suiteId && onSuggestPayload(suiteId, journey.id, step.id, caseDescriptions[step.id] ?? '')}
+                  disabled={!suiteId || suggestingStepId === step.id}
+                  title="Ask Claude to suggest a payload for this case (requires the `claude` CLI on PATH)"
+                  className="px-2 py-1 text-xs rounded bg-accent/10 text-accent border border-accent/30 hover:bg-accent/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+                >
+                  {suggestingStepId === step.id ? 'Thinking...' : '\u2728 Suggest'}
+                </button>
+              </div>
+              <BodyEditor
+                value={step.payload}
+                onSave={(next) => updateStep(step.id, { payload: next })}
+              />
+            </div>
+          )}
+          {active === 'Headers' && (
+            <KeyValueEditor
+              value={step.headers}
+              onSave={(next) => updateStep(step.id, { headers: next })}
+            />
+          )}
+          {active === 'Query' && (
+            <KeyValueEditor
+              value={step.queryParams}
+              onSave={(next) => updateStep(step.id, { queryParams: next })}
+            />
+          )}
+          {active === 'Sent' && result && (
+            <div className="space-y-3">
+              {result.requestBody !== undefined && (
+                <div>
+                  <div className="text-[10px] text-text-muted mb-0.5">Body</div>
+                  <JsonPreview data={result.requestBody} />
+                </div>
+              )}
+              {result.requestHeaders && Object.keys(result.requestHeaders).length > 0 && (
+                <div>
+                  <div className="text-[10px] text-text-muted mb-0.5">Headers (includes auto-injected Authorization)</div>
+                  <JsonPreview data={result.requestHeaders} />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
       </CollapsibleSection>
     );
   };
 
-  const renderResponseSection = (result: StepResult) => (
-    <CollapsibleSection title="Response" defaultOpen>
-      {result.responseHeaders && Object.keys(result.responseHeaders).length > 0 && (
-        <div className="mb-1">
-          <span className="text-[10px] text-text-muted">Headers:</span>
-          <pre className="mt-0.5 p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-32 text-text">
-            {JSON.stringify(result.responseHeaders, null, 2)}
-          </pre>
+  const renderResponseSection = (result: StepResult) => {
+    const tabs = ['Body', 'Headers'] as const;
+    return (
+      <CollapsibleSection title="Response" defaultOpen>
+        <Tabs tabs={tabs} active={resTab} onChange={setResTab} />
+        <div className="pt-2">
+          {resTab === 'Body' && <JsonPreview data={result.responseBody} />}
+          {resTab === 'Headers' && <JsonPreview data={result.responseHeaders} />}
         </div>
-      )}
-      {result.responseBody !== undefined && (
-        <div>
-          <span className="text-[10px] text-text-muted">Body:</span>
-          <pre className="mt-0.5 p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-48 text-text">
-            {JSON.stringify(result.responseBody, null, 2)}
-          </pre>
-        </div>
-      )}
-    </CollapsibleSection>
-  );
+      </CollapsibleSection>
+    );
+  };
 
   return (
     <div className="flex-1 overflow-y-auto p-4">
@@ -217,9 +437,25 @@ export default function MainPanel({ journey, suiteId, stepResults, runResults, o
                   <div className="mt-2">
                     <span className="text-[10px] uppercase text-text-muted font-medium">Status Code</span>
                     <div className="mt-1 flex items-center gap-3 font-mono text-xs">
-                      <div>
-                        <span className="text-text-muted">expected: </span>
-                        <span className="text-text">{step.expectedStatus}</span>
+                      <div className="flex items-center gap-1">
+                        <span className="text-text-muted">expected:</span>
+                        <input
+                          type="number"
+                          min={100}
+                          max={599}
+                          defaultValue={step.expectedStatus}
+                          onBlur={(e) => {
+                            const next = parseInt(e.target.value, 10);
+                            if (!Number.isNaN(next) && next !== step.expectedStatus) {
+                              updateStep(step.id, { expectedStatus: next });
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
+                          }}
+                          className="w-14 bg-surface2 text-text px-1 py-0 rounded border border-border focus:border-accent outline-none"
+                          title="Edit expected status code"
+                        />
                       </div>
                       {result?.statusCode !== undefined && (
                         <>
@@ -289,9 +525,10 @@ export default function MainPanel({ journey, suiteId, stepResults, runResults, o
                   {renderRequestSection(step, result)}
 
                   {/* Response section */}
-                  {result && (result.responseBody !== undefined || (result.responseHeaders && Object.keys(result.responseHeaders).length > 0)) && (
-                    renderResponseSection(result)
-                  )}
+                  {result && (
+                    result.responseBody !== undefined ||
+                    (result.responseHeaders && Object.keys(result.responseHeaders).length > 0)
+                  ) && renderResponseSection(result)}
 
                   {/* Extracted values */}
                   {result?.extractedValues && Object.keys(result.extractedValues).length > 0 && (

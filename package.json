@@ -1,39 +1,89 @@
 {
   "name": "qaapi",
-  "displayName": "QAAPI",
-  "description": "AI-powered API integration testing. Combines OpenAPI specs with source code intelligence to generate tests that find real bugs.",
+  "displayName": "qaapi",
+  "description": "API integration testing inside VSCode. Import endpoints from OpenAPI, edit requests inline, run with auth injected, and use Claude on-demand to fill realistic payloads or expand coverage.",
   "version": "0.0.1",
   "publisher": "qaapi",
+  "license": "MIT",
+  "author": {
+    "name": "Abiodun Samson Maborukoje"
+  },
   "engines": {
     "vscode": "^1.93.0"
   },
   "categories": [
-    "Testing"
+    "Testing",
+    "Other"
   ],
+  "keywords": [
+    "api",
+    "openapi",
+    "swagger",
+    "testing",
+    "integration",
+    "postman",
+    "rest",
+    "claude",
+    "ai"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SamsonMaborukoje/qaapi"
+  },
+  "bugs": {
+    "url": "https://github.com/SamsonMaborukoje/qaapi/issues"
+  },
+  "homepage": "https://github.com/SamsonMaborukoje/qaapi#readme",
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "qaapi.openPanel",
-        "title": "QAAPI: Open Panel"
+        "title": "qaapi: Open Panel"
       },
       {
         "command": "qaapi.generateTests",
-        "title": "QAAPI: Generate Tests"
+        "title": "qaapi: Sync from OpenAPI"
       },
       {
         "command": "qaapi.runTests",
-        "title": "QAAPI: Run Tests"
+        "title": "qaapi: Run Tests"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "qaapi",
+          "title": "qaapi",
+          "icon": "media/qaapi.svg"
+        }
+      ]
+    },
+    "views": {
+      "qaapi": [
+        {
+          "id": "qaapi.launcher",
+          "name": "qaapi",
+          "type": "tree"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "qaapi.launcher",
+        "contents": "qaapi panel is opening...\n\nIf it did not open, click below.\n\n[Open qaapi Panel](command:qaapi.openPanel)"
       }
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run build",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "build:webview": "cd webview && npm run build",
-    "build": "npm run compile && npm run build:webview"
+    "build": "npm run compile && npm run build:webview",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "dependencies": {
     "@apidevtools/swagger-parser": "^10.1.1",
@@ -43,6 +93,7 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.93.0",
+    "@vscode/vsce": "^3.2.0",
     "typescript": "^5.7.0"
   }
 }

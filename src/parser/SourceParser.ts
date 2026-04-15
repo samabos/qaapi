@@ -1,62 +1,24 @@
 import * as vscode from 'vscode';
-import {
-  SourceContext,
-  RoleGuard,
-  ValidationRule,
-  ErrorCondition,
-  DtoDefinition,
-  RoleEnum,
-} from '../types';
-
-const SOURCE_CAP = 60_000;
+import { SourceContext, DtoDefinition } from '../types';
 
 export class SourceParser {
   /**
-   * Parse all source files under the given paths and return extracted business
-   * logic context. Total extracted text is capped at SOURCE_CAP characters.
+   * Walk the configured source paths and extract DTO / request-body class
+   * definitions. Used by the AI features (suggest payload, expand cases) to
+   * give Claude grounded field names. Regex-based  MVP, not AST.
    */
   async parse(workspaceRoot: vscode.Uri, sourcePaths: string[]): Promise<SourceContext> {
-    const ctx: SourceContext = {
-      roleGuards: [],
-      validationRules: [],
-      errorConditions: [],
-      dtoDefinitions: [],
-      roleEnums: [],
-    };
-
+    const ctx: SourceContext = { dtoDefinitions: [] };
     const files = await this.collectFiles(workspaceRoot, sourcePaths);
 
     for (const file of files) {
       const content = await this.readFile(file);
       if (!content) continue;
-
       const relativePath = vscode.workspace.asRelativePath(file);
-      this.extractRoleGuards(content, relativePath, ctx.roleGuards);
-      this.extractValidationRules(content, relativePath, ctx.validationRules);
-      this.extractErrorConditions(content, relativePath, ctx.errorConditions);
       this.extractDtoDefinitions(content, relativePath, ctx.dtoDefinitions);
-      this.extractRoleEnums(content, relativePath, ctx.roleEnums);
     }
 
     return ctx;
-  }
-
-  /**
-   * Return raw source code text for all files under sourcePaths, capped at
-   * SOURCE_CAP characters. Used as context for the AI generator.
-   */
-  async getRawContext(workspaceRoot: vscode.Uri, sourcePaths: string[]): Promise<string> {
-    const files = await this.collectFiles(workspaceRoot, sourcePaths);
-    let total = '';
-    for (const file of files) {
-      if (total.length >= SOURCE_CAP) break;
-      const content = await this.readFile(file);
-      if (!content) continue;
-      const relativePath = vscode.workspace.asRelativePath(file);
-      const block = `\n// --- ${relativePath} ---\n${content}\n`;
-      total += block;
-    }
-    return total.slice(0, SOURCE_CAP);
   }
 
   /* ---- File collection ----------------------------------------- */
@@ -101,51 +63,6 @@ export class SourceParser {
 
   /* ---- Regex extractors ---------------------------------------- */
 
-  private extractRoleGuards(content: string, filePath: string, out: RoleGuard[]): void {
-    const re = /@(?:Roles|RequireRoles)\(\s*([^)]+)\)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(content)) !== null) {
-      const roles = m[1]
-        .split(',')
-        .map(r => r.trim().replace(/['"]/g, ''))
-        .filter(Boolean);
-      const line = content.slice(0, m.index).split('\n').length;
-      out.push({ filePath, line, roles });
-    }
-  }
-
-  private extractValidationRules(content: string, filePath: string, out: ValidationRule[]): void {
-    const re = /@(IsEmail|MinLength|MaxLength|IsEnum|IsNotEmpty|IsString|IsNumber|IsOptional|IsInt|IsBoolean|IsArray|IsUrl|IsDate|Matches|Min|Max)\(([^)]*)\)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(content)) !== null) {
-      const line = content.slice(0, m.index).split('\n').length;
-      // Try to find the field name on the next line
-      const afterDecorator = content.slice(m.index + m[0].length);
-      const fieldMatch = afterDecorator.match(/\s+(\w+)\s*[?:]/);
-      out.push({
-        filePath,
-        line,
-        field: fieldMatch?.[1] ?? 'unknown',
-        decorator: m[1],
-        params: m[2] || undefined,
-      });
-    }
-  }
-
-  private extractErrorConditions(content: string, filePath: string, out: ErrorCondition[]): void {
-    const re = /throw\s+new\s+(ForbiddenException|NotFoundException|BadRequestException|UnauthorizedException|ConflictException)\(\s*['"`]?([^'"`)\n]*)['"`]?\s*\)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(content)) !== null) {
-      const line = content.slice(0, m.index).split('\n').length;
-      out.push({
-        filePath,
-        line,
-        exceptionType: m[1],
-        message: m[2] || undefined,
-      });
-    }
-  }
-
   private extractDtoDefinitions(content: string, filePath: string, out: DtoDefinition[]): void {
     const re = /class\s+(\w*(?:Dto|Input|Body))\s*\{([^}]*)\}/gs;
     let m: RegExpExecArray | null;
@@ -154,31 +71,9 @@ export class SourceParser {
         .split('\n')
         .map(l => l.trim())
         .filter(l => l && !l.startsWith('//') && !l.startsWith('@') && l.includes(':'))
-        .map(l => l.split(':')[0].replace(/[?!]/g, '').trim())
+        .map(l => l.split(':')[0].replaceAll(/[?!]/g, '').trim())
         .filter(Boolean);
       out.push({ filePath, className: m[1], fields });
-    }
-  }
-
-  private extractRoleEnums(content: string, filePath: string, out: RoleEnum[]): void {
-    const re = /enum\s+(\w*Role\w*)\s*\{([^}]*)\}/gi;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(content)) !== null) {
-      const values = m[2]
-        .split(',')
-        .map(v => v.trim().split('=')[0].trim())
-        .filter(Boolean);
-      out.push({ filePath, name: m[1], values });
-    }
-
-    // Also match: const Roles = { ... } style
-    const constRe = /(?:const|let)\s+(\w*Role\w*)\s*=\s*\{([^}]*)\}/gi;
-    while ((m = constRe.exec(content)) !== null) {
-      const values = m[2]
-        .split(',')
-        .map(v => v.trim().split(':')[0].trim())
-        .filter(Boolean);
-      out.push({ filePath, name: m[1], values });
     }
   }
 }

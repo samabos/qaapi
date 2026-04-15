@@ -1,5 +1,20 @@
 import { useState, useEffect } from 'react';
-import type { QAAPIConfig, AuthConfig, RoleCredentials } from '../types';
+import type { QAAPIConfig, AuthConfig, RoleCredentials, TokenChain } from '../types';
+import TokenChainEditor from './TokenChainEditor';
+
+const DEFAULT_TOKEN_CHAIN: TokenChain = {
+  steps: [
+    {
+      name: 'step1',
+      method: 'POST',
+      url: '',
+      bodyType: 'json',
+      body: {},
+      headers: {},
+      extract: '$.access_token',
+    },
+  ],
+};
 
 interface SettingsProps {
   config: QAAPIConfig | null;
@@ -7,6 +22,8 @@ interface SettingsProps {
   onSave: (config: QAAPIConfig) => void;
   onSaveAuth: (config: AuthConfig) => void;
   onClose: () => void;
+  onExportBundle: () => void;
+  onImportBundle: () => void;
 }
 
 interface RoleEntry {
@@ -31,7 +48,7 @@ function entriesToCredentials(entries: RoleEntry[]): Record<string, RoleCredenti
   return out;
 }
 
-export default function Settings({ config, authConfig, onSave, onSaveAuth, onClose }: SettingsProps) {
+export default function Settings({ config, authConfig, onSave, onSaveAuth, onClose, onExportBundle, onImportBundle }: SettingsProps) {
   const [baseUrl, setBaseUrl] = useState('');
   const [openApiPath, setOpenApiPath] = useState('');
   const [sourcePaths, setSourcePaths] = useState('');
@@ -47,6 +64,7 @@ export default function Settings({ config, authConfig, onSave, onSaveAuth, onClo
   const [oauth2ClientSecret, setOauth2ClientSecret] = useState('');
   const [oauth2Scope, setOauth2Scope] = useState('');
   const [roleEntries, setRoleEntries] = useState<RoleEntry[]>([{ role: '', email: '', password: '' }]);
+  const [tokenChain, setTokenChain] = useState<TokenChain>(DEFAULT_TOKEN_CHAIN);
 
   useEffect(() => {
     if (!config) return;
@@ -68,6 +86,11 @@ export default function Settings({ config, authConfig, onSave, onSaveAuth, onClo
     setOauth2ClientSecret(authConfig.oauth2?.clientSecret ?? '');
     setOauth2Scope(authConfig.oauth2?.scope ?? '');
     setRoleEntries(credentialsToEntries(authConfig.credentials));
+    setTokenChain(
+      authConfig.tokenChain && authConfig.tokenChain.steps.length > 0
+        ? authConfig.tokenChain
+        : DEFAULT_TOKEN_CHAIN,
+    );
   }, [authConfig]);
 
   const handleSave = () => {
@@ -102,6 +125,8 @@ export default function Settings({ config, authConfig, onSave, onSaveAuth, onClo
         clientSecret: oauth2ClientSecret,
         ...(oauth2Scope ? { scope: oauth2Scope } : {}),
       };
+    } else if (strategy === 'token-chain') {
+      updatedAuth.tokenChain = tokenChain;
     }
 
     onSave(updatedConfig);
@@ -137,6 +162,18 @@ export default function Settings({ config, authConfig, onSave, onSaveAuth, onClo
         </div>
 
         <div className="p-4 space-y-4">
+          {!config && (
+            <div className="p-3 border border-red/40 bg-red/10 rounded text-xs text-red">
+              <div className="font-medium mb-1">No workspace open</div>
+              <div className="text-text-muted">
+                qaapi writes config to <span className="font-mono">.qaapi/</span> inside
+                the open folder. Open a project folder in this window
+                (<span className="font-mono">File → Open Folder</span>) and reload
+                the panel. Save is disabled until then.
+              </div>
+            </div>
+          )}
+
           {/* Base URL */}
           <div>
             <label className="block text-xs font-medium text-text-muted mb-1">
@@ -174,10 +211,11 @@ export default function Settings({ config, authConfig, onSave, onSaveAuth, onClo
             </p>
           </div>
 
-          {/* Source Paths */}
+          {/* Source Paths — used by AI features (Suggest payload, Expand cases) to read DTOs/validators */}
           <div>
             <label className="block text-xs font-medium text-text-muted mb-1">
               Codebase Path
+              <span className="ml-1 text-text-muted/60 font-normal">(optional, used by AI features)</span>
             </label>
             <input
               type="text"
@@ -187,8 +225,8 @@ export default function Settings({ config, authConfig, onSave, onSaveAuth, onClo
               className={inputClass}
             />
             <p className="mt-1 text-[11px] text-text-muted">
-              Comma-separated directories to scan for source code (relative to workspace root).
-              Useful for monorepos — point to the specific API's source.
+              Comma-separated directories to scan for DTOs / validators. AI features use this to
+              produce grounded payloads. Leave empty if you don't want AI to read source.
             </p>
           </div>
 
@@ -204,11 +242,12 @@ export default function Settings({ config, authConfig, onSave, onSaveAuth, onClo
                 onChange={(e) => setStrategy(e.target.value as AuthConfig['strategy'])}
                 className="w-full bg-surface2 text-text text-sm px-3 py-2 rounded border border-border focus:border-accent outline-none"
               >
-                <option value="none">None</option>
-                <option value="credentials">Credentials</option>
-                <option value="auto-register">Auto-register</option>
-                <option value="api-key">API Key</option>
-                <option value="oauth2-client-credentials">OAuth2 Client Credentials</option>
+                <option value="none" className="bg-surface2 text-text">None</option>
+                <option value="credentials" className="bg-surface2 text-text">Credentials</option>
+                <option value="auto-register" className="bg-surface2 text-text">Auto-register</option>
+                <option value="api-key" className="bg-surface2 text-text">API Key</option>
+                <option value="oauth2-client-credentials" className="bg-surface2 text-text">OAuth2 Client Credentials</option>
+                <option value="token-chain" className="bg-surface2 text-text">Token Chain (custom)</option>
               </select>
             </div>
 
@@ -371,6 +410,37 @@ export default function Settings({ config, authConfig, onSave, onSaveAuth, onClo
                 </div>
               </div>
             )}
+
+            {strategy === 'token-chain' && (
+              <TokenChainEditor chain={tokenChain} onChange={setTokenChain} />
+            )}
+          </div>
+
+          {/* ── Share ── */}
+          <div className="border-t border-border pt-4">
+            <h3 className="text-xs font-medium text-text mb-2">Share</h3>
+            <p className="text-[11px] text-text-muted mb-3">
+              Export your config, auth, and test suites as an AES-256 encrypted bundle.
+              Send the file and password to a colleague via <span className="font-medium">separate</span> channels.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={onExportBundle}
+                disabled={!config}
+                className="px-3 py-1.5 text-xs font-medium rounded bg-surface2 text-text border border-border hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                title="Encrypt config + auth + tests with a password and save to a file"
+              >
+                Export bundle
+              </button>
+              <button
+                onClick={onImportBundle}
+                disabled={!config}
+                className="px-3 py-1.5 text-xs font-medium rounded bg-surface2 text-text border border-border hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                title="Decrypt a colleague's bundle and merge into this workspace"
+              >
+                Import bundle
+              </button>
+            </div>
           </div>
         </div>
 
@@ -383,7 +453,8 @@ export default function Settings({ config, authConfig, onSave, onSaveAuth, onClo
           </button>
           <button
             onClick={handleSave}
-            className="px-3 py-1.5 text-xs font-medium rounded bg-accent text-white hover:bg-accent/90 transition-colors"
+            disabled={!config}
+            className="px-3 py-1.5 text-xs font-medium rounded bg-accent text-white hover:bg-accent/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             Save
           </button>

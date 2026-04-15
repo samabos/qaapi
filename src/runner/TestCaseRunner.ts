@@ -1,5 +1,17 @@
-import { request } from 'undici';
+import { request, Agent } from 'undici';
 import { JSONPath } from 'jsonpath-plus';
+
+/** Allow self-signed dev certs on localhost — never applied to remote hosts. */
+const insecureLocalhostAgent = new Agent({ connect: { rejectUnauthorized: false } });
+
+function isLocalhost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
+}
 import {
   Journey,
   Step,
@@ -16,7 +28,7 @@ export interface StepUpdateCallback {
   (result: StepResult): void;
 }
 
-export class DAGRunner {
+export class TestCaseRunner {
   constructor(private authManager: AuthManager) {}
 
   /**
@@ -125,6 +137,7 @@ export class DAGRunner {
       method: step.method,
       headers,
       body,
+      dispatcher: isLocalhost(fullUrl) ? insecureLocalhostAgent : undefined,
     });
 
     const responseBody = await response.body.json().catch(() => null);

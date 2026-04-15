@@ -1,98 +1,112 @@
-# QAAPI — VSCode Extension Architecture
+# qaapi, VSCode Extension Architecture
 
-> AI-powered API integration testing. Combines OpenAPI specs with source code intelligence to generate tests that find real bugs, not just happy paths.
-
----
-
-## Core Differentiator
-
-OpenAPI tells QAAPI **what** endpoints exist. Source code tells QAAPI **how** they behave — validation rules, role guards, error conditions, entity relationships. Combined with Claude AI, this produces test cases that reflect real application logic.
+> API integration testing inside VSCode. Import endpoints directly from OpenAPI, edit bodies/headers/params inline, run them with auth injected, and use AI on-demand to fill in realistic payloads or expand coverage across response codes.
 
 ---
 
-## Process Model
+## Design principles
 
-No backend. No sidecar. Everything runs inside the VSCode Extension Host (Node.js). The Webview panel (React) is a stateless UI layer communicating via `postMessage`.
+- **Deterministic by default.** Tests come from the OpenAPI spec. AI is opt-in, per-endpoint, and additive.
+- **Non-destructive.** Importing again merges; it never overwrites user edits. User-edited payloads, names, headers, assertions, all preserved.
+- **Local-only.** Extension host plus webview. No backend, no sidecar, no API key we manage.
+- **Use what's there.** Auth tokens go in memory. Bundles ship encrypted with a password. Claude CLI is invoked by subprocess, no separate key to manage.
+
+---
+
+## Process model
+
+Everything runs inside the VSCode Extension Host (Node.js). The webview panel (React) is a stateless UI that talks to the host via `postMessage`.
 
 ```
 VSCode Extension Host (Node.js)
-├── SourceParser        regex patterns on source code → business logic context
-├── OpenAPIParser       swagger-parser → endpoints, schemas, security schemes
-├── AIGenerator         Claude API → TestSuite JSON (OpenAPI + source combined)
-├── AuthManager         bootstrap tokens for each role before test runs
-├── DAGRunner           execute journeys step-by-step, JSONPath chaining
-├── FileStore           .qaapi/ folder read/write per repo
-└── QAAPIController     orchestrates all of the above
+├── QAAPIController         orchestrates every operation
+├── PanelManager            webview panel lifecycle + activity bar integration
+├── OpenAPIGenerator        deterministic TestSuite from dereferenced spec
+├── AIGenerator             calls `claude` CLI: suggestPayload, expandCases
+├── SourceParser            regex extraction of DTO class definitions
+├── TestCaseRunner          executes journeys step-by-step, JSONPath chaining
+├── AuthManager             token bootstrap + expiry-aware caching
+├── FileStore               .qaapi/ folder read/write
+├── crypto/bundle.ts        AES-256-GCM encrypted export/import
+└── Logger                  VSCode Output channel "qaapi"
         ↕ postMessage
-Webview (React + Tailwind)   — stateless, display only
+Webview (React + Tailwind + Vite), stateless, display + edit
 ```
 
 ---
 
-## Tech Stack
+## Tech stack
 
-| Layer | Technology | Why |
+| Layer | Technology | Notes |
 |---|---|---|
-| Extension Host | TypeScript + VSCode Extension API | Core runtime, file I/O |
-| HTTP Client | undici | Fast lightweight Node.js HTTP |
-| OpenAPI Parsing | swagger-parser | Dereference + validate OpenAPI 2/3 |
-| Source Parsing | Regex pattern matching (not Tree-sitter for MVP) | Simpler, sufficient for extracting guards/validators |
-| AI Generation | Anthropic SDK — `claude-sonnet-4-20250514` | Test case + payload generation |
-| JSONPath | jsonpath-plus | Step output extraction + assertion evaluation |
-| Webview UI | React + Tailwind CSS | Panel rendered inside VSCode |
+| Extension host | TypeScript + VSCode Extension API | Target `vscode` engine `^1.93.0` |
+| HTTP client | **undici** | All HTTP calls: tests, spec fetch, auth |
+| OpenAPI parsing | `@apidevtools/swagger-parser` | Dereference inline, fetch via undici for localhost TLS bypass |
+| AI generation | **Claude Code CLI** subprocess (`claude -p`) | No API key. CLI must be on PATH. |
+| JSONPath | `jsonpath-plus` | Assertions, extractions, token-chain extract |
+| Webview UI | React 19 + Tailwind CSS + Vite | Built separately, loaded from `webview/dist/` |
+| Crypto | Node `crypto` (PBKDF2 + AES-256-GCM) | Encrypted bundles |
 | Persistence | `.qaapi/` folder via `vscode.workspace.fs` | Per-repo, git-committable |
 
 ---
 
-## File Structure
+## File structure
 
 ```
-qaapi/                          ← extension root
-├── package.json
+qaapi/                               ← extension root
+├── package.json                     ← activity bar view container + commands
 ├── tsconfig.json
+├── media/qaapi.svg                  ← activity bar icon (monochrome, currentColor)
 ├── src/
-│   ├── extension.ts            ← activate(), registers commands
-│   ├── types.ts                ← all shared types + message protocol
+│   ├── extension.ts                 ← activate(), commands, launcher tree view
+│   ├── types.ts                     ← shared types + message protocol
+│   ├── Logger.ts                    ← VSCode Output channel wrapper
 │   ├── extension/
-│   │   ├── QAAPIController.ts  ← orchestrates everything
-│   │   └── PanelManager.ts     ← creates/manages webview panel
+│   │   ├── QAAPIController.ts       ← all message handlers, orchestration
+│   │   └── PanelManager.ts          ← webview panel create/reveal
 │   ├── ai/
-│   │   └── AIGenerator.ts      ← calls Claude API
+│   │   └── AIGenerator.ts           ← spawns `claude` CLI; suggestPayload + expandCases
+│   ├── generator/
+│   │   └── OpenAPIGenerator.ts      ← spec to TestSuite (one journey per operation)
 │   ├── parser/
-│   │   └── SourceParser.ts     ← extracts business logic from source
+│   │   └── SourceParser.ts          ← DTO class extraction for AI grounding
 │   ├── runner/
-│   │   ├── DAGRunner.ts        ← executes journeys
-│   │   └── AuthManager.ts      ← auth bootstrapping
-│   └── store/
-│       └── FileStore.ts        ← .qaapi/ read/write
+│   │   ├── TestCaseRunner.ts        ← executes journeys (was DAGRunner)
+│   │   └── AuthManager.ts           ← bootstrap + token caching
+│   ├── store/
+│   │   └── FileStore.ts             ← .qaapi/ read/write, legacy format migration
+│   └── crypto/
+│       └── bundle.ts                ← AES-256-GCM encrypted bundle export/import
 └── webview/
     ├── package.json
     ├── vite.config.ts
     ├── tailwind.config.js
     └── src/
-        ├── main.tsx            ← entry, acquireVsCodeApi()
-        ├── App.tsx             ← state management + message bridge
-        ├── types.ts            ← mirror of src/types.ts
-        ├── index.css           ← design tokens, dark theme
+        ├── main.tsx
+        ├── App.tsx                  ← state + message bridge + optimistic updates
+        ├── types.ts                 ← mirror of src/types.ts, keep in sync
+        ├── index.css                ← design tokens
         └── components/
-            ├── TopBar.tsx      ← env switcher, API status, generate/run buttons
-            ├── Sidebar.tsx     ← suite/journey navigation tree
-            └── MainPanel.tsx   ← journey detail, live step results, assertions
+            ├── TopBar.tsx           ← env switcher, API status, auth status, Sync/Run All
+            ├── Sidebar.tsx          ← suites → endpoint groups → journeys + actions
+            ├── MainPanel.tsx        ← journey detail, tabbed Body/Headers/Query/Sent
+            ├── Settings.tsx         ← env, auth, share (import/export bundle)
+            └── TokenChainEditor.tsx ← multi-step custom auth flow editor
 
-project-repo/                   ← developer's repo (target being tested)
+target-repo/                         ← developer's repo under test
 └── .qaapi/
-    ├── qaapi.config.json       ← environments, openApiPath, sourcePaths
-    ├── auth.config.json        ← auth strategy + credentials per role
+    ├── qaapi.config.json
+    ├── auth.config.json
     └── tests/
-        ├── users.journey.json
+        ├── users.journey.json       ← one TestSuite per domain (first path segment)
         └── orders.journey.json
 ```
 
 ---
 
-## Data Model
+## Data model
 
-### QAAPIConfig — `qaapi.config.json`
+### QAAPIConfig, `qaapi.config.json`
 
 ```json
 {
@@ -102,298 +116,237 @@ project-repo/                   ← developer's repo (target being tested)
   },
   "activeEnvironment": "local",
   "openApiPath": "http://localhost:3000/api-docs/json",
-  "sourcePaths": ["src/modules", "src/controllers"]
+  "sourcePaths": ["src/modules"]
 }
 ```
 
-Auto-detect OpenAPI spec in order:
-1. Fetch from running API (`baseUrl/api-docs/json`, `baseUrl/swagger.json`, `baseUrl/openapi.yaml`)
-2. Fall back to file in repo root (`swagger.json`, `openapi.yaml`, `docs/api.yaml`)
+`sourcePaths` is optional. It's only read by the AI features to pull DTO snippets as grounding for Claude.
 
-### AuthConfig — `auth.config.json`
+### AuthConfig, `auth.config.json`
 
-```json
-{
-  "strategy": "credentials",
-  "credentials": {
-    "admin":  { "email": "admin@example.com",  "password": "..." },
-    "member": { "email": "member@example.com", "password": "..." }
-  },
-  "loginEndpoint": "/auth/login",
-  "registerEndpoint": "/auth/register"
+Five strategies. See "Authentication" section for details.
+
+```typescript
+interface AuthConfig {
+  strategy: 'credentials' | 'auto-register' | 'api-key' | 'oauth2-client-credentials' | 'token-chain' | 'none';
+  credentials?: Record<string, RoleCredentials>;  // legacy multi-key, first entry used
+  loginEndpoint?: string;
+  registerEndpoint?: string;
+  apiKey?: string;
+  oauth2?: OAuth2ClientCredentials;
+  tokenChain?: TokenChain;
 }
 ```
 
-### TestSuite — `{domain}.journey.json`
+### TestSuite, `{domain}.journey.json`
 
 ```typescript
 interface TestSuite {
-  id: string;           // domain name e.g. "users"
+  id: string;           // domain (first path segment)
   name: string;
   journeys: Journey[];
   generatedAt: string;
-  sourceHash: string;   // md5 of source files — detect when to regenerate
+  sourceHash: string;   // md5 of spec-at-import, metadata only
 }
 
 interface Journey {
   id: string;
   name: string;
   description: string;
-  roles: string[];
+  tags?: string[];                  // e.g. ['happy-path'], ['validation']
   steps: Step[];
-  extractions: Extraction[];  // output → input mappings between steps
+  extractions: Extraction[];        // declarative chain data between steps
 }
 
 interface Step {
   id: string;
   name: string;
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-  path: string;               // supports {{ctx.varName}} templates
+  path: string;                      // supports {{ctx.x}} / {{env.baseUrl}}
   payload?: Record<string, unknown>;
   headers?: Record<string, string>;
   queryParams?: Record<string, string>;
-  expectedStatus: Record<string, number>;  // { admin: 201, member: 403, guest: 401 }
+  expectedStatus: number;            // single value, no role matrix
   assertions: Assertion[];
 }
 
-interface Extraction {
-  from: string;   // "steps.0.response.body.id"
-  to: string;     // "ctx.userId"
-}
-
+interface Extraction { from: string; to: string; }
 interface Assertion {
-  path: string;           // JSONPath e.g. "$.body.id"
-  exists?: boolean;
-  equals?: unknown;
-  contains?: unknown;
-  greaterThan?: number;
+  path: string;                      // JSONPath against { body: responseBody }
+  exists?: boolean; equals?: unknown; contains?: unknown; greaterThan?: number;
 }
 ```
 
 ---
 
-## Feature Specs
+## Feature specs
 
-### 1. Test Case Generation
+### 1. Deterministic OpenAPI import
 
-**Input to Claude (per domain):**
-- Full OpenAPI spec for that domain's endpoints
-- Source code excerpts: route handlers, guards, validators, DTOs, role enums
-- Existing test cases (if any) — to avoid overwriting manual edits
+Button: **"Sync from OpenAPI"** in the TopBar.
 
-**Source parsing — regex patterns (not AST for MVP):**
-```
-@Roles(), @RequireRoles()              → role guards
-@IsEmail, @MinLength, @IsEnum, etc.    → validation rules  
-throw new ForbiddenException(...)      → error conditions
-throw new NotFoundException(...)       → error conditions
-if (condition) throw/return            → business logic branches
-class *Guard implements CanActivate    → auth guards
-class *Dto / *Input / *Body            → request shapes
-enum *Role* / const *Role*             → role constants
-```
-Cap extracted source context at **60k characters** before sending to Claude.
+- Fetch the spec over undici (bypass TLS for `localhost` / `127.0.0.1` / `::1`)
+- Hand the parsed object to `SwaggerParser.dereference()` to resolve `$ref`
+- Group paths by first segment (`/api/users/...` becomes domain `api`)
+- `OpenAPIGenerator` creates one `Journey` per operation, one `Step` per journey, `method` + `path` from the spec, `expectedStatus` = first declared 2xx (fallback 200), `payload` synthesized from `requestBody.schema` (example, default, type-based stub), required `queryParams` / `headers` from `parameters`, `assertions: []`
 
-**Claude output — JSON matching TestSuite schema directly:**
-- Journey definitions per logical user flow
-- Realistic payloads (enums, formats, required fields respected)
-- Edge case variants: missing required fields, wrong types, forbidden roles
-- JSONPath extraction mappings between chained steps
-- Expected status codes per role per step
+**Merge, never replace.** For each domain:
+- If no suite exists, create it
+- If a suite exists, keep every existing journey verbatim; append only endpoints the suite doesn't already have (keyed by `method:path`)
 
-**Generation is idempotent:**
-- Hash source files (md5) and compare to `sourceHash` in existing suite
-- Only regenerate suites where source has changed
-- Preserve manual edits on unchanged suites
+So re-running Sync is idempotent. To re-import an endpoint that was edited or removed, delete the journey first and Sync again.
 
-**AI Prompt strategy:**
-- Feed Claude one domain at a time (all `/users` endpoints together)
-- Include service layer code for that domain
-- Request JSON output matching TestSuite schema — no intermediate format
-- Model: `claude-sonnet-4-20250514`
+### 2. Test execution, `TestCaseRunner`
 
----
+Sequential per-journey pipeline. For each step:
 
-### 2. Journey Chaining (DAG Runner)
+1. Mark `running`, emit live update
+2. Resolve `{{ctx.x}}` / `{{env.baseUrl}}` templates in path, headers, query, payload
+3. Inject `Authorization: Bearer <token>` via `authManager.ensureToken()`
+4. Apply TLS bypass if URL is localhost
+5. HTTP call via undici
+6. Evaluate `expectedStatus` match + all assertions
+7. Apply any extractions that reference this step's index, populate `ctx`
+8. Emit `passed` or `failed` update; on failure, remaining steps marked `skipped`
 
-Steps execute sequentially. Each step's response is available to extract values for subsequent steps via JSONPath.
+Assertions evaluate against an envelope `{ body: responseBody }`. Paths must start with `$.body.`. Operators: `exists`, `equals` (deep), `contains`, `greaterThan`.
 
-```
-Step 1: POST /auth/login
-  → extracts: steps.0.response.body.token  → ctx.token
-  → extracts: steps.0.response.body.user.id → ctx.userId
+Extractions use `from: "steps.<N>.response.<path>"` and `to: "ctx.<varName>"`.
 
-Step 2: POST /orders  (body uses {{ctx.userId}})
-  → extracts: steps.1.response.body.orderId → ctx.orderId
+### 3. AI features (on-demand, per-endpoint)
 
-Step 3: GET /orders/{{ctx.orderId}}
-  → asserts: $.body.status equals "pending"
-```
+Both invoked via `claude -p` subprocess. No API key. Uses whatever account the Claude CLI is signed in with.
 
-**Execution rules:**
-- Mutable context object per journey run
-- Template variables `{{ctx.varName}}` and `{{env.baseUrl}}` resolved at execution time
-- Failed step → remaining steps marked `skipped`, journey halts
-- Failed extraction → journey halts with clear error identifying which step/path failed
+**Suggest payload.** `✨ Suggest` button in the Body tab of a step. User types a case description ("valid happy path", "missing required email"). Prompt includes: endpoint method + path, OpenAPI operation JSON, best-effort DTO source (ranked by class-name match against the operation), case description, current payload. Returns a single JSON object, lands in the Body editor, auto-saves via `UPDATE_TEST_CASE`.
 
----
+**Expand cases.** `✨` icon on endpoint group headers in the sidebar. Asks Claude for one test case per response code declared in the OpenAPI operation that doesn't already have a journey in the suite. Prompt lists existing case names to avoid duplicates. Returns a JSON array. Each element becomes a new `Journey` with a single `Step`, appended, never replaces.
 
-### 3. Role-Based Test Matrix
+Failure modes:
+- `claude` not on PATH, `ClaudeCliMissingError`, blocking modal with "Open install guide" link
+- Empty stdout, "Claude returned no output" (usually swallowed auth prompt)
+- Invalid JSON, parse error surfaces in the webview error banner
 
-Every journey runs across all its defined roles. Each role has its own auth context and expected status codes per step.
+### 4. Authentication
 
-| Role | Auth Context | Expected Status | Purpose |
-|---|---|---|---|
-| admin | Admin JWT | 201 Created | Verify admin can create |
-| member | Member JWT | 403 Forbidden | Verify members blocked |
-| guest | No token | 401 Unauthorized | Verify unauth rejected |
+Five strategies in `AuthManager`. All tokens live in memory only, never on disk.
 
-Roles auto-detected from source: `@Roles()` decorators, role middleware, `*Role*` enum files. Developer can also define roles manually in `qaapi.config.json`.
+| Strategy | How |
+|---|---|
+| `credentials` | POST `{email, password}` to `loginEndpoint`, extract token from response |
+| `auto-register` | Ephemeral `qaapi_*@test.local` user via `registerEndpoint`, then login |
+| `api-key` | Static key from config, injected as Bearer |
+| `oauth2-client-credentials` | Standard OAuth2, with TTL cache + 30s skew refresh |
+| `token-chain` | N sequential requests with `{{stepName}}` templates between them; last step's extract is the bearer token. JWT `exp` claim auto-honored for caching. Per-chain `insecureTls` flag for dev certs with untrusted chains. |
+| `none` | No auth header |
 
-All roles run in sequence per journey (parallel post-MVP).
+`ensureToken()` is called before every test request. For OAuth2 and token-chain, it re-fetches when within 30s of expiry. Other strategies return the cached token as-is; `refresh()` re-logs in explicitly.
 
----
+Token extraction falls back through common field names: `token`, `access_token`, `accessToken`, `jwt`, `idToken`, with `data.*` nesting.
 
-### 4. Auth Bootstrapping
+### 5. Localhost TLS bypass
 
-Before any test run, establish tokens for all roles. Try strategies in priority order:
+When the target hostname is `localhost` / `127.0.0.1` / `::1`, HTTP calls use a shared `undici.Agent` with `rejectUnauthorized: false`. Applied consistently in `TestCaseRunner`, `QAAPIController.fetchAndDereference`, and `QAAPIController.checkApiHealth`. **Never applied to remote hosts.** For remote dev certs, the user opts in via the token-chain's `insecureTls` flag.
 
-| Priority | Strategy | How |
-|---|---|---|
-| 1 | Provided credentials | `auth.config.json` credentials per role → POST to `loginEndpoint` |
-| 2 | Auto-register | POST to `registerEndpoint`, create ephemeral user with `qaapi_` prefix |
-| 3 | API key | Static key from `auth.config.json` injected as Bearer token |
-| 4 | No auth | Guest role — run unauthenticated |
+### 6. Journey management
 
-**Session rules:**
-- Tokens stored **in memory only** — never written to disk
-- Auto-refresh on 401 response (re-login with same credentials)
-- Ephemeral users prefixed `qaapi_` for easy manual cleanup
-- Token extraction tries common field names: `token`, `access_token`, `accessToken`, `jwt`, `idToken`, nested `data.token`
+Sidebar hover actions on each journey:
+- **▶ Run** runs just this journey
+- **✎ Rename** inline edit; Enter to save, Esc to cancel
+- **⧉ Duplicate** deep copy with new id, `(copy)` suffix
+- **× Delete** two-click confirm pattern
 
----
+Sidebar hover actions on suite rows:
+- **× Delete** two-click confirm, removes the whole `.journey.json` file
 
-### 5. Environment Management
+Aggregate status counts on suite headers and endpoint groups: `N✓ N✗ N` (passed, failed, not-run). Zeros hidden. Recomputed from `runResults`. Running a single journey only replaces its own result, preserving others' status dots.
 
-Named environments in `qaapi.config.json`. Active environment sets `baseUrl` for all requests.
+### 7. Editable step details
 
-**API Health Check — before every run:**
-- Ping `baseUrl` with 3 second timeout
-- If unreachable → show warning with environment name
-- If `package.json` dev script detected → offer to auto-start the API
-- Show live status indicator in UI (green dot = reachable, red = offline)
+Request section has tabs: **Body** (JSON textarea, auto-saves on blur if valid JSON), **Headers** (key-value), **Query** (key-value), **Sent** (appears after a run, read-only view of what actually went out, including auto-injected Authorization). Body hidden for GET/DELETE.
+
+Expected status code is an inline editable number input. Override Claude's guess when needed.
+
+Response section: **Body**, **Headers** tabs.
+
+### 8. Sharing via encrypted bundle
+
+**Export.** Settings, Share, Export bundle. Prompts twice for a password (min 8 chars), save dialog. Bundle format: JSON with AES-256-GCM ciphertext over `{config, auth, tests}`, PBKDF2-SHA256 (210k iterations, OWASP 2023), random 16-byte salt + 12-byte IV. Tampering detected via GCM auth tag.
+
+**Import.** Pick file, enter password. Confirmation modal before applying. Config and auth are replaced; test suites are merged by id (same `method:path` rule as Sync). Never overwrites journeys silently.
+
+Reminder in the password prompt: send the file and password via different channels.
+
+### 9. Activity bar integration
+
+A dedicated activity bar icon (monochrome SVG in `media/qaapi.svg`). Clicking it opens a sidebar view that auto-launches the qaapi panel **on first visibility this session**. Closing the panel keeps it closed until the user explicitly reopens it via the welcome link in the sidebar or the command palette.
+
+### 10. Diagnostics
+
+`View`, `Output`, select `qaapi` shows timestamped `INFO` / `WARN` / `ERROR` lines from `Logger`. Token-chain steps log full request URL, response status, response body (truncated to 2000 chars) on failure. TLS errors get an "enable Allow insecure TLS" hint. Suggest and Expand failures log the full error.
 
 ---
 
-### 6. Anthropic API Key
-
-Prompted on first use. Stored securely in `vscode.secrets` (VSCode encrypted credential store — never touches disk in plaintext).
-
-```typescript
-// Store
-await context.secrets.store('qaapi.anthropicKey', apiKey);
-
-// Retrieve
-const key = await context.secrets.get('qaapi.anthropicKey');
-```
-
-Validate format on input: must start with `sk-ant-`.
-
----
-
-## Webview Message Protocol
+## Webview message protocol
 
 ### Extension → Webview
 
 | Type | Payload | When |
 |---|---|---|
-| `ENVIRONMENTS_LOADED` | `{ environments, active }` | On panel open or env change |
-| `TEST_SUITES_LOADED` | `TestSuite[]` | On open or after generation |
-| `GENERATION_PROGRESS` | `{ message, progress: 0-100 }` | During AI generation |
+| `ENVIRONMENTS_LOADED` | `{ environments, active }` | On panel open, env switch, config update |
+| `CONFIG_LOADED` | `QAAPIConfig` | Same |
+| `TEST_SUITES_LOADED` | `TestSuite[]` | On open or after any suite mutation |
+| `GENERATION_PROGRESS` | `{ message, progress }` | During OpenAPI Sync |
 | `TEST_STEP_UPDATE` | `StepResult` | Live during test run |
 | `RUN_COMPLETE` | `RunResult` | After journey finishes |
-| `AUTH_STATUS` | `{ strategy, user?, ready }` | After auth bootstrap |
-| `API_STATUS` | `{ reachable, latency? }` | On health check |
+| `AUTH_CONFIG_LOADED` | `AuthConfig` | On open, after auth saved |
+| `AUTH_STATUS` | `{ strategy, ready }` | After bootstrap or strategy change |
+| `API_STATUS` | `{ reachable, latency? }` | After health check |
+| `PAYLOAD_SUGGESTION` | `{ stepId, payload?, error? }` | After Suggest completes |
+| `CASES_EXPANDED` | `{ suiteId, journeyId, added, error? }` | After Expand completes |
 | `ERROR` | `{ message }` | On any error |
 
 ### Webview → Extension
 
 | Type | Payload | Action |
 |---|---|---|
-| `READY` | — | Webview loaded, send initial state |
-| `GENERATE_TESTS` | `{ force?: boolean }` | Trigger AI generation |
-| `RUN_TESTS` | `{ suiteId?, journeyId?, role? }` | Execute tests |
-| `UPDATE_TEST_CASE` | `{ suiteId, journey }` | Persist manual edit |
-| `DELETE_TEST_CASE` | `{ suiteId, journeyId }` | Remove from file |
+| `READY` | | Webview loaded; send initial state |
+| `GENERATE_TESTS` | `{ force? }` | Merge OpenAPI spec into suites |
+| `RUN_TESTS` | `{ suiteId?, journeyId?, stepId? }` | Execute |
+| `UPDATE_TEST_CASE` | `{ suiteId, journey }` | Persist edit |
+| `DELETE_TEST_CASE` | `{ suiteId, journeyId }` | Remove journey from suite |
+| `DELETE_SUITE` | `{ suiteId }` | Remove whole .journey.json |
 | `SET_ENVIRONMENT` | `{ name }` | Switch active env |
-| `SET_AUTH` | `AuthConfig` | Update auth config |
-| `OPEN_SETTINGS` | — | Open VSCode settings |
+| `SET_AUTH` | `AuthConfig` | Update auth |
+| `UPDATE_CONFIG` | `QAAPIConfig` | Update config |
+| `CANCEL_GENERATION` | | Kill active Claude CLI subprocess |
+| `OPEN_SETTINGS` | | Open VSCode settings |
+| `EXPORT_BUNDLE` | | Password prompt + save dialog |
+| `IMPORT_BUNDLE` | | Open dialog + password + confirm + merge |
+| `SUGGEST_PAYLOAD` | `{ suiteId, journeyId, stepId, description }` | Claude body suggestion |
+| `EXPAND_CASES` | `{ suiteId, journeyId }` | Claude adds journeys for this endpoint |
 
 ---
 
-## UI Design
+## UI design
 
-**Theme:** Dark, developer-focused. CSS variables for all colors.
+Dark theme tuned to VSCode's chrome. All colors map to VSCode theme variables with dark fallbacks (see `webview/src/index.css`).
 
-```css
---bg: #0d1117          /* page background */
---surface: #161b22     /* cards, panels */
---surface2: #1c2333    /* inputs, code blocks */
---border: #30363d
---text: #e6edf3
---text-muted: #7d8590
---accent: #2f81f7      /* primary blue */
---green: #3fb950       /* passed */
---red: #f85149         /* failed */
---yellow: #d29922      /* warning */
+```
+┌────────────────────────────────────────────────────────────┐
+│ TopBar: [qaapi] env ▾ • API:● • Auth:● …  [Sync] [Run All] │
+├────────────────────┬───────────────────────────────────────┤
+│ Sidebar            │ MainPanel                             │
+│ ▼ api   2✓ 1✗ 8    │ Journey name  [▶ Run]                 │
+│   ▼ POST /api/x ✨  │ ┌─ Step 1  POST /api/x     ●passed ─┐ │
+│     ● 200 happy    │ │ expected: [200]  actual: 200 ✓     │ │
+│     ● 400 empty    │ │ Request: Body ▾ Headers Query Sent │ │
+│     ● 404 missing  │ │   ┌─ textarea with { "field": … } ┐│ │
+│   ▶ GET  /api/x    │ │   └────────────────────────────── ┘│ │
+│ ▼ cases 0✓ 0✗ 3    │ │ Response: Body ▾ Headers            │ │
+│                    │ └────────────────────────────────────┘ │
+└────────────────────┴───────────────────────────────────────┘
 ```
 
-**Layout:**
-```
-┌─────────────────────────────────────────────┐
-│ TopBar: logo | env dropdown | API status dot | generate btn | run all btn │
-├──────────────┬──────────────────────────────┤
-│ Sidebar      │ Main Panel                   │
-│              │                              │
-│ ▶ users      │ Journey name + description   │
-│   ● create   │ Role filter dropdown         │
-│   ● fetch    │                              │
-│ ▶ orders     │ Steps list (method + path)   │
-│              │ Live status per step         │
-│              │                              │
-│              │ Latest run results           │
-│              │ Response body (expandable)   │
-│              │ Assertions pass/fail         │
-│              │ Extracted values             │
-│              │                              │
-│              │ Chain mappings (from → to)   │
-└──────────────┴──────────────────────────────┘
-```
-
-**Fonts:** IBM Plex Mono for code/paths, Inter for UI text.
+**Fonts:** VSCode editor font for code/paths, VSCode UI font for labels.
 
 ---
-
-## MVP Build Phases
-
-| Phase | Scope | Deliverable |
-|---|---|---|
-| 1 | OpenAPI parsing → AI generation → single step execution → results UI | Working extension, generates and runs basic tests |
-| 2 | Journey chaining (DAG runner) + JSONPath extraction + live streaming | Multi-step flows with live execution view |
-| 3 | Auth bootstrapping (all strategies) + role matrix | Role-aware tests with auto-auth |
-| 4 | Source code parsing + edge case enrichment | Business-logic-aware generation |
-
----
-
-## Non-Goals (MVP)
-
-- No browser automation — API testing only
-- No remote backend — all logic local in extension host
-- No CI/CD integration — post-MVP
-- No test coverage reporting — post-MVP
-- No parallel role execution — sequential for MVP
-- No multi-repo management — one workspace at a time
-
----
-
-*This is the single source of truth. All implementation decisions reference this document. Deviations require discussion and update before proceeding.*

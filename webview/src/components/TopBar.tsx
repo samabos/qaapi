@@ -8,7 +8,6 @@ interface TopBarProps {
   authReady: boolean | null;
   authStrategy: string;
   generating: boolean;
-  genProgress: number;
   onSetEnvironment: (name: string) => void;
   onGenerate: () => void;
   onRunAll: () => void;
@@ -31,7 +30,7 @@ export default function TopBar({
   return (
     <div className="flex items-center gap-3 px-4 py-2 bg-surface border-b border-border">
       {/* Logo */}
-      <span className="font-mono font-bold text-accent text-sm tracking-wide">QAAPI</span>
+      <span className="font-mono font-bold text-accent text-sm tracking-wide">qaapi</span>
 
       <div className="w-px h-5 bg-border" />
 
@@ -42,7 +41,7 @@ export default function TopBar({
         className="bg-surface2 text-text text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none"
       >
         {Object.keys(environments).map((name) => (
-          <option key={name} value={name}>
+          <option key={name} value={name} className="bg-surface2 text-text">
             {name}
           </option>
         ))}
@@ -102,9 +101,10 @@ export default function TopBar({
       <button
         onClick={onGenerate}
         disabled={generating}
+        title="Merge endpoints from the OpenAPI spec into existing suites. User edits are preserved; only new endpoints are added. Delete a journey or suite first if you want it re-imported."
         className="px-3 py-1 text-xs font-medium rounded bg-surface2 text-text border border-border hover:border-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
       >
-        {generating ? 'Generating...' : 'Generate'}
+        {generating ? 'Syncing...' : 'Sync from OpenAPI'}
       </button>
 
       <button

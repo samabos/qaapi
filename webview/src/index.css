@@ -61,3 +61,14 @@ code, .font-mono {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(100%); }
 }
+
+/* Native dropdown options inherit OS rendering and ignore Tailwind classes
+   on <option> in most browsers — force them to match the surface theme. */
+select {
+  background: var(--surface2);
+  color: var(--text);
+}
+select option {
+  background: var(--surface2);
+  color: var(--text);
+}

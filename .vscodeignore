@@ -1,0 +1,50 @@
+# What ships in the .vsix:
+#   out/**/*.js            — compiled extension host
+#   media/**               — activity bar icon
+#   webview/dist/**        — built webview bundle
+#   node_modules/**        — production deps (undici, swagger-parser, jsonpath-plus)
+#   package.json, README.md, LICENSE
+#
+# Everything below is excluded.
+
+# Extension source (compiled to out/)
+src/**
+tsconfig.json
+**/*.ts.map
+**/*.d.ts
+
+# Webview source (built to webview/dist/)
+webview/src/**
+webview/public/**
+webview/index.html
+webview/*.config.ts
+webview/*.config.js
+webview/tsconfig*.json
+webview/package.json
+webview/package-lock.json
+webview/pnpm-lock.yaml
+webview/node_modules/**
+
+# Dev / meta
+.github/**
+.vscode/**
+.gitignore
+.gitattributes
+.editorconfig
+.eslintrc*
+.eslint*
+CLAUDE.md
+CONTRIBUTING.md
+docs/**
+pnpm-lock.yaml
+package-lock.json
+
+# Tests
+**/*.test.ts
+**/*.spec.ts
+**/__tests__/**
+
+# OS / editor detritus
+.DS_Store
+Thumbs.db
+*.log

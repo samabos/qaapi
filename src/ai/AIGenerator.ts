@@ -1,47 +1,39 @@
-import { TestSuite, SourceContext } from '../types';
-import * as crypto from 'crypto';
 import * as cp from 'child_process';
+import { log } from '../Logger';
 
-export interface GenerationProgress {
-  (message: string, progress: number): void;
+/** One AI-generated test case, before it's promoted to a full Journey. */
+export interface ExpandedCase {
+  name: string;
+  description: string;
+  expectedStatus: number;
+  payload?: Record<string, unknown>;
+  headers?: Record<string, string>;
+  queryParams?: Record<string, string>;
+}
+
+/** Thrown when the `claude` CLI isn't on PATH. The controller catches this
+ *  and shows a modal with an actionable install button. */
+export class ClaudeCliMissingError extends Error {
+  constructor() {
+    super('Claude Code CLI is not installed or not on your PATH.');
+    this.name = 'ClaudeCliMissingError';
+  }
+}
+
+/** Patterns that indicate the shell couldn't find the `claude` binary. */
+function looksLikeNotFound(stderr: string): boolean {
+  const s = stderr.toLowerCase();
+  return (
+    s.includes('not recognized') ||
+    s.includes('command not found') ||
+    s.includes('cannot find') ||
+    s.includes('no such file or directory')
+  );
 }
 
 export class AIGenerator {
   private activeProcess: cp.ChildProcess | null = null;
 
-  /**
-   * Generate a TestSuite for the given domain using OpenAPI spec + source context.
-   * Shells out to `claude -p` (print mode) — uses the user's existing Claude Code
-   * authentication. No API key or Copilot needed.
-   */
-  async generate(
-    domain: string,
-    openApiSnippet: string,
-    sourceContext: SourceContext,
-    rawSource: string,
-    existingSuite: TestSuite | null,
-    onProgress?: GenerationProgress,
-  ): Promise<TestSuite> {
-    onProgress?.(`Generating tests for ${domain}...`, 10);
-
-    const prompt = this.buildPrompt(domain, openApiSnippet, sourceContext, rawSource, existingSuite);
-
-    onProgress?.(`Sending to Claude...`, 20);
-
-    const text = await this.callClaude(prompt, onProgress);
-
-    onProgress?.(`Parsing response...`, 95);
-
-    const suite = this.parseResponse(text, domain, rawSource);
-
-    onProgress?.(`Done generating ${domain}`, 100);
-
-    return suite;
-  }
-
-  /**
-   * Kill the active Claude CLI process if one is running.
-   */
   cancel(): void {
     if (this.activeProcess) {
       this.activeProcess.kill();
@@ -49,18 +41,42 @@ export class AIGenerator {
     }
   }
 
+  async suggestPayload(args: {
+    method: string;
+    path: string;
+    caseDescription: string;
+    openApiOperation: unknown;
+    dtoSource: string | null;
+    currentPayload: Record<string, unknown> | undefined;
+  }): Promise<Record<string, unknown>> {
+    const prompt = this.buildSuggestPrompt(args);
+    const text = await this.callClaude(prompt);
+    return this.parseJsonResponse(text);
+  }
+
   /**
-   * Compute source hash for change detection.
+   * Generate extra test cases for an endpoint. Covers response codes declared
+   * in the OpenAPI spec + failure modes from the source (validators, thrown
+   * exceptions), skipping cases already covered by existing journey names.
    */
-  static sourceHash(content: string): string {
-    return crypto.createHash('md5').update(content).digest('hex');
+  async expandCases(args: {
+    method: string;
+    path: string;
+    openApiOperation: unknown;
+    dtoSource: string | null;
+    existingCaseNames: string[];
+  }): Promise<ExpandedCase[]> {
+    const prompt = this.buildExpandCasesPrompt(args);
+    const text = await this.callClaude(prompt);
+    return this.parseCasesResponse(text);
   }
 
   /* ---- Claude CLI ------------------------------------------------ */
 
-  private callClaude(prompt: string, onProgress?: GenerationProgress): Promise<string> {
+  private callClaude(prompt: string): Promise<string> {
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
+      log.info(`Spawning claude CLI (prompt: ${prompt.length} chars)`);
 
       const proc = cp.spawn('claude', ['-p', '--output-format', 'text'], {
         shell: true,
@@ -71,29 +87,13 @@ export class AIGenerator {
 
       let stdout = '';
       let stderr = '';
-      let receivedData = false;
-
-      // Heartbeat: update progress every 2s so the UI knows we're alive
-      const heartbeat = setInterval(() => {
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        if (receivedData) {
-          const chars = stdout.length;
-          onProgress?.(`Receiving from Claude... ${chars} chars (${elapsed}s)`, 60);
-        } else {
-          onProgress?.(`Waiting for Claude... (${elapsed}s)`, 30);
-        }
-      }, 2000);
 
       const cleanup = () => {
-        clearInterval(heartbeat);
         this.activeProcess = null;
       };
 
       proc.stdout.on('data', (chunk: Buffer) => {
-        receivedData = true;
         stdout += chunk.toString();
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        onProgress?.(`Receiving from Claude... ${stdout.length} chars (${elapsed}s)`, 60 + Math.min(30, stdout.length / 200));
       });
 
       proc.stderr.on('data', (chunk: Buffer) => {
@@ -102,10 +102,12 @@ export class AIGenerator {
 
       proc.on('error', (err) => {
         cleanup();
-        reject(new Error(
-          `Failed to run Claude CLI: ${err.message}. ` +
-          'Make sure Claude Code is installed and "claude" is on your PATH.',
-        ));
+        log.warn(`claude CLI spawn error: ${err.message}`);
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          reject(new ClaudeCliMissingError());
+          return;
+        }
+        reject(new Error(`Failed to run Claude CLI: ${err.message}`));
       });
 
       proc.on('close', (code, signal) => {
@@ -115,194 +117,157 @@ export class AIGenerator {
           return;
         }
         if (code !== 0) {
+          const errText = stderr.trim();
+          if (looksLikeNotFound(errText)) {
+            log.warn(`claude CLI not found (stderr): ${errText}`);
+            reject(new ClaudeCliMissingError());
+            return;
+          }
+          log.warn(`claude CLI exited ${code}: ${errText}`);
+          reject(new Error(`Claude CLI exited with code ${code}: ${errText || 'unknown error'}`));
+          return;
+        }
+        const duration = Math.round((Date.now() - startTime) / 1000);
+        log.info(`claude CLI complete: ${stdout.length} chars in ${duration}s`);
+
+        // Empty output usually means an auth prompt got swallowed by piped stdin.
+        // Short responses like `{}` are legitimate answers for negative-test cases.
+        if (stdout.trim().length === 0) {
+          log.warn(`claude CLI returned empty stdout. stderr: ${stderr.trim() || '(none)'}`);
           reject(new Error(
-            `Claude CLI exited with code ${code}: ${stderr.trim() || 'unknown error'}`,
+            'Claude returned no output. ' +
+            (stderr.trim() ? `stderr: ${stderr.trim()}` : 'Run `claude` once in a terminal to verify auth, then retry.'),
           ));
           return;
         }
         resolve(stdout);
       });
 
-      // Write prompt to stdin and close
       proc.stdin.write(prompt);
       proc.stdin.end();
     });
   }
 
-  /* ---- Prompt --------------------------------------------------- */
+  /* ---- Prompts --------------------------------------------------- */
 
-  private buildPrompt(
-    domain: string,
-    openApiSnippet: string,
-    sourceContext: SourceContext,
-    rawSource: string,
-    existingSuite: TestSuite | null,
-  ): string {
+  private buildSuggestPrompt(args: {
+    method: string;
+    path: string;
+    caseDescription: string;
+    openApiOperation: unknown;
+    dtoSource: string | null;
+    currentPayload: Record<string, unknown> | undefined;
+  }): string {
     const parts: string[] = [];
-
-    parts.push(`You are an expert API test generator. Generate a complete TestSuite JSON for the "${domain}" domain.`);
+    parts.push('You generate a single JSON request body for an API integration test.');
     parts.push('');
-    parts.push('The tests run as a single authenticated service user. Do NOT generate multi-role tests.');
-    parts.push('Focus on: correct HTTP status codes, request payloads, and business-logic response assertions.');
+    parts.push(`Endpoint: ${args.method} ${args.path}`);
+    parts.push(`Case being tested: ${args.caseDescription || '(no description — use a valid happy-path payload)'}`);
     parts.push('');
-
-    // ── Data sources ──
-    parts.push('## OpenAPI Spec (endpoints for this domain):');
+    parts.push('## OpenAPI operation');
     parts.push('```json');
-    parts.push(openApiSnippet);
+    parts.push(JSON.stringify(args.openApiOperation, null, 2));
     parts.push('```');
-
-    if (rawSource) {
+    if (args.dtoSource) {
       parts.push('');
-      parts.push('## Source Code:');
+      parts.push('## Matching DTO / validator source');
       parts.push('```typescript');
-      parts.push(rawSource);
+      parts.push(args.dtoSource);
+      parts.push('```');
+      parts.push('Use the field names exactly as declared. Respect validation decorators.');
+    }
+    if (args.currentPayload && Object.keys(args.currentPayload).length > 0) {
+      parts.push('');
+      parts.push('## Current payload (refine rather than replace)');
+      parts.push('```json');
+      parts.push(JSON.stringify(args.currentPayload, null, 2));
       parts.push('```');
     }
+    parts.push('');
+    parts.push('## Rules');
+    parts.push('- Return ONLY raw JSON. No markdown fences, no prose.');
+    parts.push('- For happy-path cases, values must satisfy all validation rules.');
+    parts.push('- For negative cases (missing field, invalid value, etc), craft the payload to trigger that specific failure.');
+    parts.push('- Use realistic values (emails, names, ISO dates). Avoid literally "test" or "foo".');
+    parts.push('- Preserve nested structures from the schema.');
+    return parts.join('\n');
+  }
 
-    if (sourceContext.dtoDefinitions.length > 0) {
-      parts.push('');
-      parts.push('## Detected DTO Definitions (request/response shapes):');
-      parts.push(JSON.stringify(sourceContext.dtoDefinitions, null, 2));
-      parts.push('Use these field names for payloads and assertions — do NOT invent field names.');
-    }
-
-    if (sourceContext.validationRules.length > 0) {
-      parts.push('');
-      parts.push('## Detected Validation Rules:');
-      parts.push(JSON.stringify(sourceContext.validationRules, null, 2));
-      parts.push('');
-      parts.push('Use these to generate validation edge-case journeys:');
-      parts.push('- For each @IsNotEmpty field, include a step that omits it → expect 400.');
-      parts.push('- For @IsEmail fields, include a step with an invalid email → expect 400.');
-      parts.push('- For @MinLength(n), include a step with a too-short value → expect 400.');
-    }
-
-    if (sourceContext.errorConditions.length > 0) {
-      parts.push('');
-      parts.push('## Detected Error Conditions (thrown exceptions):');
-      parts.push(JSON.stringify(sourceContext.errorConditions, null, 2));
-      parts.push('Map exception types to status codes: BadRequestException→400, NotFoundException→404, ConflictException→409.');
-    }
-
-    if (existingSuite) {
-      parts.push('');
-      parts.push('## Existing Test Suite (reference only — DO NOT copy assertion paths or status codes):');
-      parts.push('Use this only to understand which journeys exist. Regenerate ALL assertions from scratch using the OpenAPI spec.');
-      parts.push(JSON.stringify(existingSuite, null, 2));
-    }
-
-    // ── Critical rules ──
+  private buildExpandCasesPrompt(args: {
+    method: string;
+    path: string;
+    openApiOperation: unknown;
+    dtoSource: string | null;
+    existingCaseNames: string[];
+  }): string {
+    const parts: string[] = [];
+    parts.push(`Generate additional test cases for ${args.method} ${args.path}.`);
     parts.push('');
-    parts.push('## CRITICAL RULES — Read carefully:');
+    parts.push('Read the OpenAPI operation (especially the "responses" object) and the DTO/validators below.');
+    parts.push('For every response status the endpoint can return (200/201/204/400/404/409/500, etc.), emit ONE test case that triggers it.');
     parts.push('');
-    parts.push('### 1. Status codes: Derive from the OpenAPI spec, do NOT guess');
-    parts.push('- Read the "responses" object for each endpoint in the spec.');
-    parts.push('- POST that creates a resource → use the status code defined in the spec (often 201).');
-    parts.push('- GET/PUT/PATCH → use the status code defined in the spec (often 200).');
-    parts.push('- DELETE → use the status code defined in the spec (often 200 or 204).');
-    parts.push('- Validation failures → 400.');
-    parts.push('- Not found → 404.');
-    parts.push('- NEVER assume 200 for everything. Use the exact code from the spec.');
-    parts.push('');
-    parts.push('### 2. Assertion paths: Use the ACTUAL response schema');
-    parts.push('Assertions are evaluated against an envelope: `{ body: <responseBody> }`.');
-    parts.push('So ALL assertion paths MUST start with `$.body.`');
-    parts.push('');
-    parts.push('Examples — if the API returns `{ "data": { "id": 1, "name": "x" }, "status": 200, "message": "OK" }`:');
-    parts.push('  CORRECT: `$.body.data.id`   → resolves to 1');
-    parts.push('  CORRECT: `$.body.data.name` → resolves to "x"');
-    parts.push('  CORRECT: `$.body.message`   → resolves to "OK"');
-    parts.push('  WRONG:   `$.id`             → resolves to nothing');
-    parts.push('  WRONG:   `$.data.id`        → resolves to nothing');
-    parts.push('');
-    parts.push('Read the response schema from the OpenAPI spec to determine the exact structure.');
-    parts.push('If the spec wraps responses in a `data` property, use `$.body.data.<field>`.');
-    parts.push('If the spec returns flat objects, use `$.body.<field>`.');
-    parts.push('');
-    parts.push('### 3. Extraction paths');
-    parts.push('Extractions use format: `from: "steps.<index>.response.body.<path>"`, `to: "ctx.<varName>"`.');
-    parts.push('Reference extracted values in later steps as `{{ctx.<varName>}}`.');
-    parts.push('Example — extract an ID from step 0, use in step 1 URL:');
-    parts.push('  `{ "from": "steps.0.response.body.data.id", "to": "ctx.createdId" }`');
-    parts.push('  Step 1 path: `/api/items/{{ctx.createdId}}`');
-    parts.push('');
-    parts.push('### 4. Field names: Use ONLY names from the OpenAPI spec and DTOs');
-    parts.push('- Request payloads: use field names from the requestBody schema or DTO definitions above.');
-    parts.push('- Assertions: use field names from the response schema.');
-    parts.push('- NEVER invent field names. If you are unsure of a field name, omit the assertion.');
-    parts.push('');
-    parts.push('### 5. What to test');
-    parts.push('For each endpoint generate journeys covering:');
-    parts.push('- **Happy path**: valid payload → success status → assert key response fields exist/have correct types.');
-    parts.push('- **Validation errors**: missing required fields, wrong types, invalid formats → 400.');
-    parts.push('- **Not found**: reference a non-existent ID → 404.');
-    parts.push('- **Chained flows**: create → read → update → delete, using extractions to pass IDs between steps.');
-    parts.push('');
-    parts.push('### 6. Tags');
-    parts.push('Assign 1-3 tags to each journey from this list:');
-    parts.push('- "happy-path" — standard success flow');
-    parts.push('- "validation" — tests input validation / 400 errors');
-    parts.push('- "not-found" — tests 404 scenarios');
-    parts.push('- "crud-flow" — create/read/update/delete chain');
-    parts.push('- "edge-case" — boundary conditions or unusual inputs');
-
-    // ── Output format ──
-    parts.push('');
-    parts.push('## Output Format');
-    parts.push('Return ONLY valid JSON matching this TypeScript interface:');
-    parts.push('```typescript');
-    parts.push('interface TestSuite {');
-    parts.push('  id: string;           // domain name');
-    parts.push('  name: string;');
-    parts.push('  journeys: Journey[];');
-    parts.push('  generatedAt: string;  // ISO 8601');
-    parts.push('  sourceHash: string;   // will be replaced');
-    parts.push('}');
-    parts.push('interface Journey {');
-    parts.push('  id: string;');
-    parts.push('  name: string;');
-    parts.push('  description: string;');
-    parts.push('  tags: string[];              // 1-3 tags from the allowed list');
-    parts.push('  steps: Step[];');
-    parts.push('  extractions: Extraction[];');
-    parts.push('}');
-    parts.push('interface Step {');
-    parts.push('  id: string;');
-    parts.push('  name: string;');
-    parts.push('  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";');
-    parts.push('  path: string;');
-    parts.push('  payload?: Record<string, unknown>;');
-    parts.push('  headers?: Record<string, string>;');
-    parts.push('  queryParams?: Record<string, string>;');
-    parts.push('  expectedStatus: number;                  // HTTP status code from spec');
-    parts.push('  assertions: Assertion[];                 // paths MUST start with $.body.');
-    parts.push('}');
-    parts.push('interface Extraction { from: string; to: string; }');
-    parts.push('interface Assertion { path: string; exists?: boolean; equals?: unknown; contains?: unknown; greaterThan?: number; }');
+    parts.push('## OpenAPI operation');
+    parts.push('```json');
+    parts.push(JSON.stringify(args.openApiOperation, null, 2));
     parts.push('```');
+    if (args.dtoSource) {
+      parts.push('');
+      parts.push('## Matching DTO / validators / thrown exceptions');
+      parts.push('```typescript');
+      parts.push(args.dtoSource);
+      parts.push('```');
+    }
+    if (args.existingCaseNames.length > 0) {
+      parts.push('');
+      parts.push('## Existing test cases (DO NOT duplicate these)');
+      for (const name of args.existingCaseNames) parts.push(`- ${name}`);
+    }
     parts.push('');
-    parts.push('Return raw JSON only — no markdown fences, no explanation, no comments.');
-
+    parts.push('## Rules');
+    parts.push('- Craft `payload` / `headers` / `queryParams` so the request actually triggers the target status code.');
+    parts.push('- For 400 cases, violate a specific validator and name the case after the violation (e.g. "400 - missing email", "400 - email format invalid").');
+    parts.push('- For 404, reference a non-existent resource. For 409, simulate a conflict.');
+    parts.push('- Use field names from the OpenAPI schema / DTO exactly — never invent names.');
+    parts.push('- Skip status codes already covered by existing case names.');
+    parts.push('- Skip 5xx unless the source clearly shows a code path that returns it (e.g. explicit `throw new InternalServerError(...)`).');
+    parts.push('- Include a `payload` field only for methods that take a body (POST/PUT/PATCH). Omit otherwise.');
+    parts.push('');
+    parts.push('## Output format');
+    parts.push('Return ONLY a raw JSON array — no fences, no prose. Each element has:');
+    parts.push('```typescript');
+    parts.push('{ name: string; description: string; expectedStatus: number; payload?: object; headers?: Record<string,string>; queryParams?: Record<string,string>; }');
+    parts.push('```');
+    parts.push('Empty array is fine if nothing new to add.');
     return parts.join('\n');
   }
 
   /* ---- Response parsing ----------------------------------------- */
 
-  private parseResponse(text: string, domain: string, rawSource: string): TestSuite {
-    // Strip markdown fences if present
+  private parseCasesResponse(text: string): ExpandedCase[] {
     let json = text.trim();
     if (json.startsWith('```')) {
-      json = json.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+      json = json.replaceAll(/^```(?:json)?\n?/g, '').replaceAll(/\n?```$/g, '');
     }
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) {
+      throw new TypeError('Expected a JSON array of test cases.');
+    }
+    return parsed.filter((c): c is ExpandedCase =>
+      c && typeof c === 'object'
+        && typeof c.name === 'string'
+        && typeof c.expectedStatus === 'number',
+    );
+  }
 
-    const parsed = JSON.parse(json) as TestSuite;
-
-    // Ensure required fields
-    parsed.id = parsed.id || domain;
-    parsed.generatedAt = new Date().toISOString();
-    parsed.sourceHash = AIGenerator.sourceHash(rawSource);
-
-    return parsed;
+  private parseJsonResponse(text: string): Record<string, unknown> {
+    let json = text.trim();
+    if (json.startsWith('```')) {
+      json = json.replaceAll(/^```(?:json)?\n?/g, '').replaceAll(/\n?```$/g, '');
+    }
+    const parsed = JSON.parse(json);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('Claude returned a non-object payload.');
+    }
+    return parsed as Record<string, unknown>;
   }
 }
