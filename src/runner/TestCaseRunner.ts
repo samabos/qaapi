@@ -108,7 +108,10 @@ export class TestCaseRunner {
     ctx: Record<string, unknown>,
   ): Promise<StepResult> {
     const start = Date.now();
-    const path = this.resolveTemplate(step.path, ctx, baseUrl);
+    // 1. Substitute {name} placeholders with step.pathParams values.
+    // 2. Then resolve {{ctx.*}} / {{env.*}} templates.
+    const pathWithParams = this.substitutePathParams(step.path, step.pathParams);
+    const path = this.resolveTemplate(pathWithParams, ctx, baseUrl);
     const url = path.startsWith('http') ? path : `${baseUrl}${path}`;
 
     const headers: Record<string, string> = {
@@ -174,6 +177,16 @@ export class TestCaseRunner {
   }
 
   /* ---- Template resolution -------------------------------------- */
+
+  /** Replace `{name}` segments in a path with values from pathParams.
+   *  Leaves `{{double}}` templates alone so ctx/env resolution still works. */
+  private substitutePathParams(path: string, params: Record<string, string> | undefined): string {
+    if (!params) return path;
+    return path.replaceAll(/\{([^{}]+)\}/g, (match, key: string) => {
+      const value = params[key];
+      return value !== undefined && value !== '' ? encodeURIComponent(value) : match;
+    });
+  }
 
   private resolveTemplate(template: string, ctx: Record<string, unknown>, baseUrl: string): string {
     return template.replace(/\{\{(ctx|env)\.(\w+)\}\}/g, (_match, scope: string, key: string) => {

@@ -264,7 +264,16 @@ export class AIGenerator {
     if (json.startsWith('```')) {
       json = json.replaceAll(/^```(?:json)?\n?/g, '').replaceAll(/\n?```$/g, '');
     }
-    const parsed = JSON.parse(json);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const preview = json.length > 400 ? json.slice(0, 400) + '…(truncated)' : json;
+      log.warn(`Claude response was not valid JSON: ${msg}`);
+      log.warn(`  response preview: ${preview}`);
+      throw new Error(`Claude returned non-JSON output (${msg}). See View → Output → qaapi for the raw response.`);
+    }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       throw new Error('Claude returned a non-object payload.');
     }

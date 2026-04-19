@@ -88,7 +88,12 @@ export interface Step {
   id: string;
   name: string;
   method: HttpMethod;
+  /** Path template as declared in OpenAPI — e.g. `/api/parts/{inspectionType}`.
+   *  Kept verbatim so Sync can match it; real values live in `pathParams`. */
   path: string;
+  /** User-supplied values for `{name}` segments in the path, substituted at
+   *  run time. Keeps `path` stable across edits so Sync stays idempotent. */
+  pathParams?: Record<string, string>;
   payload?: Record<string, unknown>;
   headers?: Record<string, string>;
   queryParams?: Record<string, string>;

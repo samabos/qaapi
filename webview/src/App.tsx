@@ -189,9 +189,11 @@ export default function App({ vscode }: AppProps) {
   };
 
   const handleRunJourney = (suiteId: string, journeyId: string) => {
-    setStepResults([]);
-    // Only clear the previous result for THIS journey — keep other journeys'
-    // pass/fail state intact so sidebar aggregates don't reset.
+    // Clear only THIS journey's step results so other journeys' last-run
+    // details survive when you flip back to them.
+    const journey = suites.find(s => s.id === suiteId)?.journeys.find(j => j.id === journeyId);
+    const stepIds = new Set(journey?.steps.map(s => s.id) ?? []);
+    setStepResults(prev => prev.filter(r => !stepIds.has(r.stepId)));
     setRunResults(prev => prev.filter(r => !(r.suiteId === suiteId && r.journeyId === journeyId)));
     vscode.postMessage({ type: 'RUN_TESTS', suiteId, journeyId });
   };
@@ -264,7 +266,8 @@ export default function App({ vscode }: AppProps) {
   const handleSelectJourney = (suiteId: string, journeyId: string) => {
     setSelectedSuiteId(suiteId);
     setSelectedJourneyId(journeyId);
-    setStepResults([]);
+    // Preserve stepResults across selections — MainPanel filters by stepId so
+    // the newly-selected journey still sees its own last-run details.
   };
 
   const handleSaveConfig = (updated: QAAPIConfig) => {

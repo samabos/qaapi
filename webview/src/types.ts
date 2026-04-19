@@ -68,6 +68,7 @@ export interface Step {
   name: string;
   method: HttpMethod;
   path: string;
+  pathParams?: Record<string, string>;
   payload?: Record<string, unknown>;
   headers?: Record<string, string>;
   queryParams?: Record<string, string>;

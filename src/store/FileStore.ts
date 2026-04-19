@@ -8,6 +8,7 @@ import {
 const QAAPI_DIR = '.qaapi';
 const CONFIG_FILE = 'qaapi.config.json';
 const AUTH_FILE = 'auth.config.json';
+const SPEC_CACHE_FILE = 'openapi.cache.json';
 const TESTS_DIR = 'tests';
 
 export class FileStore {
@@ -35,6 +36,18 @@ export class FileStore {
 
   async writeAuth(auth: AuthConfig): Promise<void> {
     await this.writeJson(AUTH_FILE, auth);
+  }
+
+  /* ---- OpenAPI spec cache --------------------------------------- */
+
+  /** Dereferenced spec saved at Sync time so AI features don't need the
+   *  dev API to be running. Committing this is up to the user. */
+  async readSpec(): Promise<Record<string, unknown> | null> {
+    return this.readJson<Record<string, unknown>>(SPEC_CACHE_FILE);
+  }
+
+  async writeSpec(spec: Record<string, unknown>): Promise<void> {
+    await this.writeJson(SPEC_CACHE_FILE, spec);
   }
 
   /* ---- Test Suites --------------------------------------------- */

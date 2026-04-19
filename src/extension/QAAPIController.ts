@@ -20,6 +20,20 @@ import { log } from '../Logger';
 /** Allow self-signed dev certs (ASP.NET, Vite, etc) on localhost only. */
 const insecureLocalhostAgent = new Agent({ connect: { rejectUnauthorized: false } });
 
+/**
+ * Extract a useful error message. Node's AggregateError (e.g. from a TCP
+ * connection attempt that tried IPv6 and IPv4 both) has an empty `.message`
+ * by design; the real info lives in `.errors[]`.
+ */
+function describeError(err: unknown): string {
+  if (err instanceof AggregateError && err.errors.length > 0) {
+    const causes = err.errors.map(e => (e instanceof Error ? e.message : String(e)));
+    return `${err.constructor.name}: ${causes.join(' / ')}`;
+  }
+  if (err instanceof Error) return err.message || err.constructor.name;
+  return String(err);
+}
+
 function isLocalhost(url: string): boolean {
   try {
     const host = new URL(url).hostname;
@@ -40,6 +54,9 @@ export class QAAPIController {
   private generator = new AIGenerator();
   private openApiGenerator = new OpenAPIGenerator();
   private suites: TestSuite[] = [];
+  /** Dereferenced OpenAPI spec, populated on Sync and loaded from disk at
+   *  startup. Used by Suggest / Expand so they don't hit the network. */
+  private cachedSpec: Record<string, unknown> | null = null;
 
   onMessage: ((msg: ExtensionToWebviewMessage) => void) | undefined;
 
@@ -143,6 +160,8 @@ export class QAAPIController {
     this.suites = await this.store.readAllSuites();
     this.send({ type: 'TEST_SUITES_LOADED', suites: this.suites });
 
+    this.cachedSpec = await this.store.readSpec();
+
     await this.checkApiHealth();
   }
 
@@ -164,6 +183,11 @@ export class QAAPIController {
     }
 
     await this.generateFromOpenAPI(domains);
+
+    // Cache the dereferenced spec so Suggest / Expand don't need the
+    // dev API to be running afterwards.
+    this.cachedSpec = spec;
+    await this.store.writeSpec(spec);
 
     this.suites = await this.store.readAllSuites();
     this.send({ type: 'TEST_SUITES_LOADED', suites: this.suites });
@@ -336,9 +360,14 @@ export class QAAPIController {
     }
 
     try {
-      const spec = await this.fetchAndDereference(this.config.openApiPath);
-      const specPaths = (spec.paths ?? {}) as Record<string, Record<string, unknown>>;
-      const operation = specPaths[step.path]?.[step.method.toLowerCase()] ?? null;
+      // Prefer the cached spec saved at Sync time; fall back to network
+      // only if the cache is empty (e.g. user deleted the cache file).
+      let operation: unknown = null;
+      const spec = this.cachedSpec ?? await this.tryFetchSpec();
+      if (spec) {
+        const specPaths = (spec.paths ?? {}) as Record<string, Record<string, unknown>>;
+        operation = specPaths[step.path]?.[step.method.toLowerCase()] ?? null;
+      }
 
       // Best-effort DTO lookup from the configured source paths.
       let dtoSource: string | null = null;
@@ -348,7 +377,7 @@ export class QAAPIController {
           dtoSource = await this.findDtoSource(root, this.config.sourcePaths, step, operation);
         }
       } catch (err) {
-        log.warn(`DTO lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`DTO lookup failed: ${describeError(err)}`);
       }
 
       log.info(`Suggesting payload for ${step.method} ${step.path} — case: ${description || '(none)'}`);
@@ -368,8 +397,11 @@ export class QAAPIController {
         this.send({ type: 'PAYLOAD_SUGGESTION', stepId, error: err.message });
         return;
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      log.warn(`Payload suggestion failed for ${stepId}: ${msg}`);
+      const msg = describeError(err);
+      const type = err instanceof Error ? err.constructor.name : typeof err;
+      const stack = err instanceof Error && err.stack ? err.stack : '';
+      log.warn(`Payload suggestion failed for ${stepId} [${type}]: ${msg}`);
+      if (stack) log.warn(`  stack: ${stack}`);
       this.send({ type: 'PAYLOAD_SUGGESTION', stepId, error: msg });
     }
   }
@@ -387,9 +419,13 @@ export class QAAPIController {
     }
 
     try {
-      const spec = await this.fetchAndDereference(this.config.openApiPath);
-      const specPaths = (spec.paths ?? {}) as Record<string, Record<string, unknown>>;
-      const operation = specPaths[step.path]?.[step.method.toLowerCase()] ?? null;
+      // Prefer cached spec; fall back to network only if cache missing.
+      let operation: unknown = null;
+      const spec = this.cachedSpec ?? await this.tryFetchSpec();
+      if (spec) {
+        const specPaths = (spec.paths ?? {}) as Record<string, Record<string, unknown>>;
+        operation = specPaths[step.path]?.[step.method.toLowerCase()] ?? null;
+      }
 
       let dtoSource: string | null = null;
       try {
@@ -398,7 +434,7 @@ export class QAAPIController {
           dtoSource = await this.findDtoSource(root, this.config.sourcePaths, step, operation);
         }
       } catch (err) {
-        log.warn(`DTO lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`DTO lookup failed: ${describeError(err)}`);
       }
 
       // Existing case names on this endpoint — so Claude doesn't duplicate
@@ -457,7 +493,7 @@ export class QAAPIController {
         this.send({ type: 'CASES_EXPANDED', suiteId, journeyId, added: 0, error: err.message });
         return;
       }
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = describeError(err);
       log.warn(`Expand cases failed: ${msg}`);
       this.send({ type: 'CASES_EXPANDED', suiteId, journeyId, added: 0, error: msg });
     }
@@ -706,6 +742,21 @@ export class QAAPIController {
    * then hand the parsed object to SwaggerParser for $ref dereferencing.
    * Falls back to SwaggerParser's own loader for non-http paths (file://, etc).
    */
+  /** Best-effort spec fetch. Never throws — returns null on failure and
+   *  caches the result so the next AI call is free. */
+  private async tryFetchSpec(): Promise<Record<string, unknown> | null> {
+    if (!this.config) return null;
+    try {
+      const spec = await this.fetchAndDereference(this.config.openApiPath);
+      this.cachedSpec = spec;
+      await this.store?.writeSpec(spec);
+      return spec;
+    } catch (err) {
+      log.warn(`Spec fetch failed, continuing without operation schema: ${describeError(err)}`);
+      return null;
+    }
+  }
+
   private async fetchAndDereference(specPath: string): Promise<Record<string, unknown>> {
     if (!/^https?:\/\//i.test(specPath)) {
       return (await SwaggerParser.dereference(specPath)) as Record<string, unknown>;

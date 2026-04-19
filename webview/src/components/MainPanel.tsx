@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { Journey, Step, StepResult, RunResult, HttpMethod } from '../types';
+import JsonTree from './JsonTree';
 
 interface MainPanelProps {
   journey: Journey | null;
@@ -188,18 +189,6 @@ function KeyValueEditor({ value, onSave, readOnly }: {
   );
 }
 
-/* ---- Read-only JSON preview ---------------------------------------- */
-
-function JsonPreview({ data }: { data: unknown }) {
-  if (data === null || data === undefined) {
-    return <div className="text-xs text-text-muted italic p-2">No data</div>;
-  }
-  return (
-    <pre className="p-2 bg-surface2 rounded text-xs font-mono overflow-x-auto max-h-64 text-text">
-      {typeof data === 'string' ? data : JSON.stringify(data, null, 2)}
-    </pre>
-  );
-}
 
 const METHOD_COLORS: Record<HttpMethod, string> = {
   GET: 'text-green',
@@ -231,7 +220,7 @@ function CollapsibleSection({ title, defaultOpen = false, children }: {
 
 export default function MainPanel({ journey, suiteId, stepResults, runResults, onRunJourney, onRunStep, onUpdateJourney, onSuggestPayload, suggestingStepId }: MainPanelProps) {
   const [expandedStep, setExpandedStep] = useState<string | null>(null);
-  const [reqTab, setReqTab] = useState<'Body' | 'Headers' | 'Query' | 'Sent'>('Body');
+  const [reqTab, setReqTab] = useState<'Body' | 'Headers' | 'Query' | 'Path' | 'Sent'>('Body');
   const [resTab, setResTab] = useState<'Body' | 'Headers'>('Body');
   const [caseDescriptions, setCaseDescriptions] = useState<Record<string, string>>({});
 
@@ -272,11 +261,16 @@ export default function MainPanel({ journey, suiteId, stepResults, runResults, o
 
   const renderRequestSection = (step: Step, result: StepResult | undefined) => {
     const supportsBody = METHODS_WITH_BODY.includes(step.method);
+    const pathParamNames = [...new Set(
+      [...step.path.matchAll(/\{([^{}]+)\}/g)].map(m => m[1]),
+    )];
+    const hasPathParams = pathParamNames.length > 0;
     const hasSent = !!(result?.requestHeaders || result?.requestBody !== undefined);
-    const baseTabs: ('Body' | 'Headers' | 'Query')[] = supportsBody
+    const baseTabs: ('Body' | 'Headers' | 'Query' | 'Path')[] = supportsBody
       ? ['Body', 'Headers', 'Query']
       : ['Headers', 'Query'];
-    const tabs: ('Body' | 'Headers' | 'Query' | 'Sent')[] = hasSent
+    if (hasPathParams) baseTabs.unshift('Path');
+    const tabs: ('Body' | 'Headers' | 'Query' | 'Path' | 'Sent')[] = hasSent
       ? [...baseTabs, 'Sent']
       : baseTabs;
     const active = tabs.includes(reqTab) ? reqTab : tabs[0];
@@ -330,18 +324,40 @@ export default function MainPanel({ journey, suiteId, stepResults, runResults, o
               onSave={(next) => updateStep(step.id, { queryParams: next })}
             />
           )}
+          {active === 'Path' && hasPathParams && (
+            <div className="space-y-1">
+              {pathParamNames.map((name) => (
+                <div key={name} className="flex gap-1 items-center">
+                  <span className="font-mono text-xs text-text-muted w-32 truncate">{`{${name}}`}</span>
+                  <input
+                    type="text"
+                    defaultValue={step.pathParams?.[name] ?? ''}
+                    onBlur={(e) => {
+                      const next = { ...(step.pathParams ?? {}) };
+                      const v = e.target.value.trim();
+                      if (v) next[name] = v;
+                      else delete next[name];
+                      updateStep(step.id, { pathParams: Object.keys(next).length ? next : undefined });
+                    }}
+                    placeholder="value"
+                    className="flex-1 bg-surface2 text-text text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none font-mono"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
           {active === 'Sent' && result && (
             <div className="space-y-3">
               {result.requestBody !== undefined && (
                 <div>
                   <div className="text-[10px] text-text-muted mb-0.5">Body</div>
-                  <JsonPreview data={result.requestBody} />
+                  <JsonTree data={result.requestBody} />
                 </div>
               )}
               {result.requestHeaders && Object.keys(result.requestHeaders).length > 0 && (
                 <div>
                   <div className="text-[10px] text-text-muted mb-0.5">Headers (includes auto-injected Authorization)</div>
-                  <JsonPreview data={result.requestHeaders} />
+                  <JsonTree data={result.requestHeaders} />
                 </div>
               )}
             </div>
@@ -358,8 +374,8 @@ export default function MainPanel({ journey, suiteId, stepResults, runResults, o
       <CollapsibleSection title="Response" defaultOpen>
         <Tabs tabs={tabs} active={resTab} onChange={setResTab} />
         <div className="pt-2">
-          {resTab === 'Body' && <JsonPreview data={result.responseBody} />}
-          {resTab === 'Headers' && <JsonPreview data={result.responseHeaders} />}
+          {resTab === 'Body' && <JsonTree data={result.responseBody} defaultExpandDepth={2} />}
+          {resTab === 'Headers' && <JsonTree data={result.responseHeaders} />}
         </div>
       </CollapsibleSection>
     );
